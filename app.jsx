@@ -464,48 +464,22 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused, onCapt
 
 // Google OAuth 로그인 화면
 function LoginScreen({ onLogin }) {
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const handleGoogleLogin = () => {
-    setLoading(true);
-    setError(null);
-
-    const doLogin = () => {
-      const client = window.google.accounts.oauth2.initTokenClient({
-        client_id: GOOGLE_CLIENT_ID,
-        scope: GOOGLE_DRIVE_SCOPE,
-        callback: (response) => {
-          if (response.error) {
-            setError('로그인에 실패했습니다: ' + response.error);
-            setLoading(false);
-            return;
-          }
-          onLogin(response.access_token);
-        },
-      });
-      client.requestAccessToken();
-    };
-
-    if (window.google) {
-      doLogin();
+    if (!GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID.includes('YOUR_CLIENT_ID')) {
+      setError('Google Client ID가 설정되지 않았습니다.');
       return;
     }
-
-    // window.google이 아직 없으면 최대 10초간 500ms 간격으로 재시도
-    let attempts = 0;
-    const maxAttempts = 20;
-    const timer = setInterval(() => {
-      attempts++;
-      if (window.google) {
-        clearInterval(timer);
-        doLogin();
-      } else if (attempts >= maxAttempts) {
-        clearInterval(timer);
-        setError('Google 인증 라이브러리를 불러오지 못했습니다. 네트워크를 확인하고 다시 시도해 주세요.');
-        setLoading(false);
-      }
-    }, 500);
+    const redirectUri = window.location.origin + window.location.pathname;
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      redirect_uri: redirectUri,
+      response_type: 'token',
+      scope: GOOGLE_DRIVE_SCOPE,
+      prompt: 'select_account',
+    });
+    window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
   };
 
   return (
@@ -550,31 +524,19 @@ function LoginScreen({ onLogin }) {
         }}>{error}</div>
       )}
 
-      <button onClick={handleGoogleLogin} disabled={loading} style={{
+      <button onClick={handleGoogleLogin} style={{
         width:'100%', maxWidth:320, height:52, borderRadius:14,
-        background: loading ? C.surfaceHi : '#fff',
-        border:`1px solid ${loading ? C.border : '#ddd'}`,
-        color: loading ? C.dim : '#1a1a1a',
-        fontSize:15, fontWeight:600, fontFamily:FONT_SANS,
-        cursor: loading ? 'not-allowed' : 'pointer',
-        display:'flex', alignItems:'center', justifyContent:'center', gap:10,
+        background:'#fff', border:'1px solid #ddd',
+        color:'#1a1a1a', fontSize:15, fontWeight:600, fontFamily:FONT_SANS,
+        cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:10,
       }}>
-        {loading ? (
-          <>
-            <div style={{width:18, height:18, border:`2px solid ${C.accent}`, borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite'}}/>
-            로그인 중...
-          </>
-        ) : (
-          <>
-            <svg width="20" height="20" viewBox="0 0 48 48">
-              <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/>
-              <path fill="#FF3D00" d="m6.306 14.691 6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"/>
-              <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/>
-              <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/>
-            </svg>
-            Google로 로그인
-          </>
-        )}
+        <svg width="20" height="20" viewBox="0 0 48 48">
+          <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/>
+          <path fill="#FF3D00" d="m6.306 14.691 6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"/>
+          <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/>
+          <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/>
+        </svg>
+        Google로 로그인
       </button>
 
       <div style={{marginTop:24, fontSize:11, color:C.dimmer, textAlign:'center', lineHeight:1.6, maxWidth:280}}>
@@ -836,6 +798,18 @@ function Toast({ message, visible }) {
 function CaptureApp() {
   const [accessToken, setAccessToken] = useState(null);
   const [segments, setSegments] = useState(6);
+
+  // OAuth2 redirect 후 URL 해시에서 access_token 추출
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash) return;
+    const params = new URLSearchParams(hash.slice(1));
+    const token = params.get('access_token');
+    if (token) {
+      setAccessToken(token);
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, []);
 
   // 촬영 데이터: { productId: [{blob, url}] }
   const [capturedData, setCapturedData] = useState({
