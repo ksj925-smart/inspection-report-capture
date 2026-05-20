@@ -470,25 +470,42 @@ function LoginScreen({ onLogin }) {
   const handleGoogleLogin = () => {
     setLoading(true);
     setError(null);
-    // Google Identity Services 팝업 로그인
-    if (!window.google) {
-      setError('Google 인증 라이브러리 로딩 중입니다. 잠시 후 다시 시도해 주세요.');
-      setLoading(false);
+
+    const doLogin = () => {
+      const client = window.google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: GOOGLE_DRIVE_SCOPE,
+        callback: (response) => {
+          if (response.error) {
+            setError('로그인에 실패했습니다: ' + response.error);
+            setLoading(false);
+            return;
+          }
+          onLogin(response.access_token);
+        },
+      });
+      client.requestAccessToken();
+    };
+
+    if (window.google) {
+      doLogin();
       return;
     }
-    const client = window.google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: GOOGLE_DRIVE_SCOPE,
-      callback: (response) => {
-        if (response.error) {
-          setError('로그인에 실패했습니다: ' + response.error);
-          setLoading(false);
-          return;
-        }
-        onLogin(response.access_token);
-      },
-    });
-    client.requestAccessToken();
+
+    // window.google이 아직 없으면 최대 10초간 500ms 간격으로 재시도
+    let attempts = 0;
+    const maxAttempts = 20;
+    const timer = setInterval(() => {
+      attempts++;
+      if (window.google) {
+        clearInterval(timer);
+        doLogin();
+      } else if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        setError('Google 인증 라이브러리를 불러오지 못했습니다. 네트워크를 확인하고 다시 시도해 주세요.');
+        setLoading(false);
+      }
+    }, 500);
   };
 
   return (
