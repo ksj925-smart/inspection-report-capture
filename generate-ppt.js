@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════
 // generate-ppt.js — Joint Report PPT 자동 생성
 // pptxgenjs (CDN) 사용 / window.generateJointReportPPT() 노출
+// 반환값: { blob: Blob, fileName: string }  (Drive에 직접 업로드)
 // ═══════════════════════════════════════════════════════════════
 
 async function blobToDataUrl(blob) {
@@ -27,7 +28,7 @@ const PRODUCTS_DEF = [
 ];
 
 // 촬영 비율과 동일하게 PPT 이미지 비율 유지 [가로, 세로]
-const CROP_RATIO = {
+const CROP_RATIO_PPT = {
   outer_race: [3, 4],
   inner_race: [3, 4],
   cage:       [8, 3],
@@ -36,13 +37,12 @@ const CROP_RATIO = {
 
 const HDR_COLOR   = '1F5C8B';
 const BG_COLOR    = '0B0C0E';
-const SURFACE     = '15171B';
-const ACCENT      = 'C8FF3D';
+const SURFACE_PPT = '15171B';
+const ACCENT_PPT  = 'C8FF3D';
 const TEXT_COLOR  = 'F5F5F7';
 const DIM_COLOR   = '9CA0AA';
 
 // ── 이미지 비율 유지 피팅 헬퍼 ──────────────────────────────────
-// maxW × maxH 박스 안에 rw:rh 비율 이미지를 중앙 피팅
 function calcImageFit(maxW, maxH, rw, rh) {
   const scale = Math.min(maxW / rw, maxH / rh);
   const w = rw * scale;
@@ -58,7 +58,6 @@ async function addProductSlide(pptx, title, shots, cols, ratioWH) {
   const slide = pptx.addSlide();
   slide.background = { color: BG_COLOR };
 
-  // 헤더 바
   slide.addShape(pptx.ShapeType.rect, {
     x: 0, y: 0, w: '100%', h: 0.65,
     fill: { color: HDR_COLOR }, line: { type: 'none' },
@@ -85,14 +84,12 @@ async function addProductSlide(pptx, title, shots, cols, ratioWH) {
     const x   = marginX + col * cellW;
     const y   = startY  + row * cellH;
 
-    // 번호
     slide.addText(`#${i + 1}`, {
       x: x + imgPad, y: y + 0.02,
       w: cellW - imgPad * 2, h: lblH,
       fontSize: 8, color: DIM_COLOR, fontFace: 'Courier New',
     });
 
-    // 이미지 — 비율 유지 중앙 피팅
     if (shots[i] && shots[i].blob) {
       const dataUrl = await blobToDataUrl(shots[i].blob);
       const imgAreaW = cellW - imgPad * 2;
@@ -107,7 +104,6 @@ async function addProductSlide(pptx, title, shots, cols, ratioWH) {
       });
     }
 
-    // 셀 테두리
     slide.addShape(pptx.ShapeType.rect, {
       x: x + imgPad * 0.5, y: y + 0.01,
       w: cellW - imgPad, h: cellH - 0.06,
@@ -117,7 +113,7 @@ async function addProductSlide(pptx, title, shots, cols, ratioWH) {
   }
 }
 
-// ── BALL 슬라이드 (중앙 1:1 정사각형) ──────────────────────────
+// ── BALL 슬라이드 (중앙 1:1) ────────────────────────────────────
 async function addBallSlide(pptx, title, shot) {
   const slide = pptx.addSlide();
   slide.background = { color: BG_COLOR };
@@ -132,7 +128,6 @@ async function addBallSlide(pptx, title, shot) {
     fontFace: 'Arial',
   });
 
-  // 1:1 정사각형 — 슬라이드 바디 중앙 배치
   const size = 5.5;
   const cx = (13.33 - size) / 2;
   const bodyH = 7.5 - 0.75;
@@ -156,18 +151,18 @@ function addCoverSlide(pptx, selectedSides, date) {
 
   slide.addShape(pptx.ShapeType.rect, {
     x: 0, y: 0, w: '100%', h: 0.08,
-    fill: { color: ACCENT }, line: { type: 'none' },
+    fill: { color: ACCENT_PPT }, line: { type: 'none' },
   });
 
   slide.addShape(pptx.ShapeType.ellipse, {
     x: 5.67, y: 1.2, w: 2, h: 2,
-    fill: { color: SURFACE },
-    line: { color: ACCENT, width: 1.5 },
+    fill: { color: SURFACE_PPT },
+    line: { color: ACCENT_PPT, width: 1.5 },
   });
   slide.addShape(pptx.ShapeType.ellipse, {
     x: 6.12, y: 1.65, w: 1.1, h: 1.1,
     fill: { type: 'none' },
-    line: { color: ACCENT, width: 0.8, dashType: 'dash' },
+    line: { color: ACCENT_PPT, width: 0.8, dashType: 'dash' },
   });
 
   slide.addText('JOINT REPORT', {
@@ -191,7 +186,7 @@ function addCoverSlide(pptx, selectedSides, date) {
   if (selectedSides.inboard)  sides.push('Inboard');
   slide.addText(sides.join('  ·  '), {
     x: 0.5, y: 5.5, w: 12.33, h: 0.35,
-    fontSize: 13, color: ACCENT, align: 'center', fontFace: 'Arial',
+    fontSize: 13, color: ACCENT_PPT, align: 'center', fontFace: 'Arial',
   });
 
   slide.addShape(pptx.ShapeType.rect, {
@@ -201,6 +196,7 @@ function addCoverSlide(pptx, selectedSides, date) {
 }
 
 // ── 메인 생성 함수 ──────────────────────────────────────────────
+// 반환값: { blob: Blob, fileName: string }
 window.generateJointReportPPT = async function({ capturedData, selectedSides, segments }) {
   if (typeof PptxGenJS === 'undefined') {
     throw new Error('pptxgenjs 라이브러리가 로드되지 않았습니다. 인터넷 연결을 확인해 주세요.');
@@ -219,30 +215,30 @@ window.generateJointReportPPT = async function({ capturedData, selectedSides, se
     if (!selectedSides[side]) continue;
     const sideLabel = side === 'outboard' ? 'Outboard' : 'Inboard';
     const segs = segments[side] || 6;
-    const cols = segs <= 6 ? 3 : 4;   // OUTER/INNER RACE용 기본 cols
+    const cols = segs <= 6 ? 3 : 4;
     const sideData = capturedData[side];
 
     for (const prod of PRODUCTS_DEF) {
       const shots = sideData[prod.id] || [];
       if (shots.length === 0) continue;
 
-      const ratio = CROP_RATIO[prod.id];
+      const ratio = CROP_RATIO_PPT[prod.id];
 
       if (prod.id === 'ball') {
-        // BALL: 중앙 1장 (1:1)
         await addBallSlide(pptx, `BALL — ${sideLabel}`, shots[0]);
       } else if (prod.id === 'cage') {
-        // CAGE: 앞·뒤 전체를 한 슬라이드에 (4 cols, 8:3 비율)
+        // 앞·뒤 전체를 한 슬라이드에 (4 cols, 8:3 비율)
         await addProductSlide(pptx, `CAGE — ${sideLabel}`, shots, 4, ratio);
       } else {
-        // OUTER RACE / INNER RACE (3:4 비율)
         await addProductSlide(pptx, `${prod.name} — ${sideLabel}`, shots, cols, ratio);
       }
     }
   }
 
-  // 파일명
+  // Blob으로 반환 (로컬 다운로드 없음)
   const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
   const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, '');
-  await pptx.writeFile({ fileName: `JointReport_${dateStr}_${timeStr}.pptx` });
+  const fileName = `JointReport_${dateStr}_${timeStr}.pptx`;
+  const blob = await pptx.write({ outputType: 'blob' });
+  return { blob, fileName };
 };

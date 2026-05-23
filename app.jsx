@@ -466,9 +466,18 @@ function LoginScreen({ onLogin }) {
 
 // ─── UploadModal ──────────────────────────────────────────────
 function UploadModal({ capturedData, selectedSides, segments, accessToken, onClose, onDone }) {
-  const [phase,    setPhase]    = useState('idle');
+  const [phase,    setPhase]    = useState('confirm'); // confirm | uploading | ppt | done | error
   const [progress, setProgress] = useState({ current:0, total:0, product:'' });
   const [errorMsg, setErrorMsg] = useState('');
+  const [driveLink, setDriveLink] = useState('');
+
+  // 모달 오픈 시점 폴더명 고정
+  const sessionInfo = useRef((() => {
+    const now = new Date();
+    const d = now.toISOString().slice(0,10).replace(/-/g,'');
+    const t = now.toTimeString().slice(0,8).replace(/:/g,'');
+    return { folderName: `JointReport_${d}_${t}` };
+  })()).current;
 
   const createFolder = async (name, parentId=null) => {
     const meta = { name, mimeType:'application/vnd.google-apps.folder', ...(parentId?{parents:[parentId]}:{}) };
@@ -478,10 +487,10 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
     return data.id;
   };
 
-  const uploadFile = async (blob, filename, parentId) => {
+  const uploadFile = async (blob, filename, parentId, mimeType='image/jpeg') => {
     const meta      = JSON.stringify({ name:filename, parents:[parentId] });
     const boundary  = '----FormBoundary' + Math.random().toString(36).slice(2);
-    const metaBytes = new TextEncoder().encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: image/jpeg\r\n\r\n`);
+    const metaBytes = new TextEncoder().encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`);
     const endBytes  = new TextEncoder().encode(`\r\n--${boundary}--`);
     const blobData  = await blob.arrayBuffer();
     const body      = new Uint8Array(metaBytes.byteLength + blobData.byteLength + endBytes.byteLength);
@@ -501,11 +510,10 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
   const startUpload = async () => {
     setPhase('uploading');
     try {
-      const now      = new Date();
-      const dateStr  = now.toISOString().slice(0,10).replace(/-/g,'');
-      const timeStr  = now.toTimeString().slice(0,8).replace(/:/g,'');
       const hansaeId = await findOrCreateHansae();
-      const rootId   = await createFolder(`JointReport_${dateStr}_${timeStr}`, hansaeId);
+      const rootId   = await createFolder(sessionInfo.folderName, hansaeId);
+
+      // 사진 업로드
       let total=0;
       for (const side of SIDES) { if (!selectedSides[side]) continue; for (const arr of Object.values(capturedData[side])) total+=arr.length; }
       let current=0;
@@ -522,68 +530,125 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
           }
         }
       }
+
+      // PPT 생성 및 Drive 업로드
+      setPhase('ppt');
+      if (window.generateJointReportPPT) {
+        const { blob:pptBlob, fileName:pptName } = await window.generateJointReportPPT({ capturedData, selectedSides, segments });
+        await uploadFile(pptBlob, pptName, rootId, 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
+      }
+
+      setDriveLink(`https://drive.google.com/drive/folders/${rootId}`);
       setPhase('done');
     } catch(err) { setErrorMsg(err.message); setPhase('error'); }
   };
 
-  const summaryRows = [];
-  for (const side of SIDES) { if (!selectedSides[side]) continue; for (const prod of PRODUCTS) { const n=(capturedData[side][prod.id]||[]).length; if (n>0) summaryRows.push({side:SIDE_LABEL[side],prod,n}); } }
-  const totalCount = summaryRows.reduce((s,r)=>s+r.n,0);
+  // 사이드별 사진 수
+  const countBySide = {};
+  for (const side of SIDES) {
+    if (!selectedSides[side]) continue;
+    countBySide[side] = Object.values(capturedData[side]).reduce((s,arr)=>s+arr.length, 0);
+  }
+  const totalCount = Object.values(countBySide).reduce((s,n)=>s+n, 0);
+  const canClose = phase==='confirm' || phase==='done' || phase==='error';
 
   return (
-    <div style={{position:'absolute',inset:0,zIndex:200,background:'rgba(0,0,0,0.75)',backdropFilter:'blur(8px)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={phase==='idle'?onClose:undefined}>
+    <div style={{position:'absolute',inset:0,zIndex:200,background:'rgba(0,0,0,0.75)',backdropFilter:'blur(8px)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={canClose?onClose:undefined}>
       <div onClick={e=>e.stopPropagation()} style={{background:C.surface,border:`1px solid ${C.borderHi}`,borderRadius:'20px 20px 0 0',width:'100%',maxWidth:480,padding:24,paddingBottom:'max(24px, env(safe-area-inset-bottom))'}}>
-        {phase==='idle' && (<>
+
+        {/* ── 확인 팝업 ── */}
+        {phase==='confirm' && (<>
           <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:20}}>
-            <div style={{width:44,height:44,borderRadius:22,background:`${C.accent}15`,border:`1px solid ${C.accent}40`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            <div style={{width:44,height:44,borderRadius:22,background:`${C.accent}15`,border:`1px solid ${C.accent}40`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M7 18a4.5 4.5 0 01-.5-8.97A6 6 0 0118 9.5a4.5 4.5 0 01-.5 8.5H7z" stroke={C.accent} strokeWidth="1.7" fill="none"/><path d="M12 11v6M9.5 13.5L12 11l2.5 2.5" stroke={C.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </div>
             <div>
-              <div style={{fontSize:16,fontWeight:700,color:C.text}}>Google Drive 업로드</div>
-              <div style={{fontSize:12,color:C.dim,marginTop:2}}>총 {totalCount}장 · HANSAE/JointReport 폴더</div>
+              <div style={{fontSize:17,fontWeight:700,color:C.text}}>Google Drive 업로드</div>
+              <div style={{fontSize:12,color:C.dim,marginTop:2}}>사진 + PPT 파일을 Drive에 저장합니다</div>
             </div>
           </div>
-          <div style={{background:C.bg,borderRadius:12,padding:12,marginBottom:20,display:'flex',flexDirection:'column',gap:7}}>
-            {summaryRows.map((r,i)=>(
-              <div key={i} style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                <div style={{display:'flex',alignItems:'center',gap:8}}>
-                  <ProductIcon id={r.prod.id} size={14}/><span style={{fontSize:11,color:C.text,fontWeight:600}}>{r.prod.name}</span>
-                  <span style={{fontSize:10,color:C.dim}}>({r.side})</span>
-                </div>
-                <span style={{fontFamily:FONT_MONO,fontSize:11,color:C.accent}}>{r.n}장</span>
+
+          {/* 업로드 요약 */}
+          <div style={{background:C.bg,borderRadius:12,padding:'14px 16px',marginBottom:10}}>
+            {SIDES.filter(s=>selectedSides[s]).map(side=>(
+              <div key={side} style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                <span style={{fontSize:13,color:C.text,fontWeight:600}}>{SIDE_LABEL[side]}</span>
+                <span style={{fontFamily:FONT_MONO,fontSize:13,color:C.accent}}>{countBySide[side]}장</span>
               </div>
             ))}
+            <div style={{height:1,background:C.border,margin:'4px 0 8px'}}/>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <span style={{fontSize:13,color:C.dim}}>총</span>
+              <span style={{fontFamily:FONT_MONO,fontSize:16,fontWeight:700,color:C.accent}}>{totalCount}장</span>
+            </div>
           </div>
+
+          {/* 저장 위치 */}
+          <div style={{background:C.bg,borderRadius:10,padding:'10px 14px',marginBottom:20,display:'flex',alignItems:'flex-start',gap:8}}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{marginTop:2,flexShrink:0}}><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke={C.dim} strokeWidth="1.5"/></svg>
+            <div style={{fontSize:11,color:C.dim,fontFamily:FONT_MONO,lineHeight:1.6}}>
+              내 드라이브 &gt; HANSAE &gt;<br/>
+              <span style={{color:C.text}}>{sessionInfo.folderName}</span>
+            </div>
+          </div>
+
           <div style={{display:'flex',gap:8}}>
-            <button onClick={onClose} style={{flex:1,height:48,borderRadius:12,background:'none',border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:500,cursor:'pointer'}}>취소</button>
-            <button onClick={startUpload} style={{flex:2,height:48,borderRadius:12,background:C.accent,color:C.bg,fontSize:14,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8,border:'none'}}>
+            <button onClick={onClose} style={{flex:1,height:48,borderRadius:12,background:'none',border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>취소</button>
+            <button onClick={startUpload} style={{flex:2,height:48,borderRadius:12,background:C.accent,color:C.bg,fontSize:14,fontWeight:700,fontFamily:FONT_SANS,border:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M7 18a4.5 4.5 0 01-.5-8.97A6 6 0 0118 9.5a4.5 4.5 0 01-.5 8.5H7z" stroke="currentColor" strokeWidth="1.7" fill="none"/><path d="M12 11v6M9.5 13.5L12 11l2.5 2.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
               업로드 시작
             </button>
           </div>
         </>)}
+
+        {/* ── 사진 업로드 중 ── */}
         {phase==='uploading' && (
           <div style={{textAlign:'center',padding:'8px 0'}}>
             <div style={{width:64,height:64,borderRadius:32,margin:'0 auto 20px',background:`${C.accent}15`,border:`1px solid ${C.accent}40`,display:'flex',alignItems:'center',justifyContent:'center'}}>
               <div style={{width:28,height:28,border:`3px solid ${C.accent}`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
             </div>
-            <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>업로드 중...</div>
+            <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>사진 업로드 중...</div>
             <div style={{fontSize:13,color:C.dim,marginBottom:20}}>{progress.product} · {progress.current}/{progress.total}장</div>
             <div style={{height:4,background:C.bg,borderRadius:2,overflow:'hidden'}}>
               <div style={{height:'100%',background:C.accent,borderRadius:2,width:`${progress.total>0?(progress.current/progress.total)*100:0}%`,transition:'width 0.3s ease'}}/>
             </div>
           </div>
         )}
+
+        {/* ── PPT 생성 중 ── */}
+        {phase==='ppt' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{width:64,height:64,borderRadius:32,margin:'0 auto 20px',background:`${C.blue}25`,border:`1px solid ${C.blue}60`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <div style={{width:28,height:28,border:`3px solid #5B9BD5`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
+            </div>
+            <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>PPT 생성 중...</div>
+            <div style={{fontSize:13,color:C.dim}}>Drive에 PPT 파일을 저장하고 있습니다</div>
+          </div>
+        )}
+
+        {/* ── 완료 ── */}
         {phase==='done' && (
           <div style={{textAlign:'center',padding:'8px 0'}}>
             <div style={{width:64,height:64,borderRadius:32,margin:'0 auto 20px',background:`${C.accent}15`,border:`1px solid ${C.accent}`,display:'flex',alignItems:'center',justifyContent:'center'}}>
               <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><path d="M6 14l6 6L22 8" stroke={C.accent} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
             </div>
             <div style={{fontSize:18,fontWeight:700,color:C.text,marginBottom:6}}>업로드 완료!</div>
-            <div style={{fontSize:13,color:C.dim,marginBottom:24}}>총 {totalCount}장이 Google Drive에 저장되었습니다</div>
-            <button onClick={onDone} style={{width:'100%',height:48,borderRadius:12,background:C.accent,color:C.bg,border:'none',fontSize:14,fontWeight:700,cursor:'pointer'}}>확인</button>
+            <div style={{fontSize:13,color:C.dim,marginBottom:6}}>사진 {totalCount}장 + PPT가 Drive에 저장되었습니다</div>
+            <div style={{fontSize:10,color:C.dimmer,fontFamily:FONT_MONO,marginBottom:24,lineHeight:1.5}}>
+              내 드라이브 &gt; HANSAE &gt; {sessionInfo.folderName}
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>
+              <a href={driveLink} target="_blank" rel="noopener noreferrer"
+                style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,height:48,borderRadius:12,background:C.accent,color:C.bg,textDecoration:'none',fontSize:14,fontWeight:700}}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                Drive에서 열기
+              </a>
+              <button onClick={onDone} style={{height:44,borderRadius:12,background:'none',border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>확인</button>
+            </div>
           </div>
         )}
+
+        {/* ── 오류 ── */}
         {phase==='error' && (
           <div style={{textAlign:'center',padding:'8px 0'}}>
             <div style={{fontSize:40,marginBottom:16}}>⚠️</div>
@@ -627,11 +692,11 @@ function CaptureApp() {
   const [flipped,          setFlipped]          = useState(false);
   const [view,             setView]             = useState('capture');
   const [showUpload,       setShowUpload]       = useState(false);
-  const [pptLoading,       setPptLoading]       = useState(false);
   const [confirmRetake,    setConfirmRetake]    = useState(null);  // {side, productId}
   const [confirmSwitch,    setConfirmSwitch]    = useState(null);  // {side, productId}
   const [defaultZoom,      setDefaultZoom]      = useState(1.0);
   const [toast,            setToast]            = useState(null);
+  const [driveResult,      setDriveResult]      = useState(null);  // {link, folderName}
 
   // OAuth redirect 처리
   useEffect(() => {
@@ -711,13 +776,6 @@ function CaptureApp() {
     showToast('모든 촬영 데이터 초기화됨');
   };
 
-  const handleGeneratePPT = async () => {
-    if (!window.generateJointReportPPT) { showToast('PPT 라이브러리 로딩 중... 잠시 후 재시도'); return; }
-    setPptLoading(true);
-    try { await window.generateJointReportPPT({ capturedData, selectedSides, segments }); showToast('PPT 생성 완료! 다운로드됨'); }
-    catch(err) { showToast('PPT 생성 실패: '+err.message); }
-    finally { setPptLoading(false); }
-  };
 
   // ── 로그인 전 ──────────────────────────────────────────────
   if (!accessToken) return <LoginScreen onLogin={setAccessToken}/>;
@@ -947,12 +1005,7 @@ function CaptureApp() {
           </button>
           <button disabled={!anyShotsTotal} onClick={()=>setShowUpload(true)} style={{flex:1,height:48,borderRadius:12,background:anyShotsTotal?(allSidesDone?C.accent:C.surfaceHi):C.surface,border:`1px solid ${anyShotsTotal?(allSidesDone?C.accent:C.borderHi):C.border}`,color:allSidesDone?C.bg:anyShotsTotal?C.text:C.dimmer,fontSize:13,fontWeight:600,fontFamily:FONT_SANS,cursor:anyShotsTotal?'pointer':'not-allowed',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M7 18a4.5 4.5 0 01-.5-8.97A6 6 0 0118 9.5a4.5 4.5 0 01-.5 8.5H7z" stroke="currentColor" strokeWidth="1.7" fill="none"/><path d="M12 11v6M9.5 13.5L12 11l2.5 2.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            Drive 업로드
-          </button>
-          <button disabled={!anyShotsTotal||pptLoading} onClick={handleGeneratePPT} style={{width:48,height:48,borderRadius:12,flexShrink:0,background:anyShotsTotal?`${C.blue}30`:C.surface,border:`1px solid ${anyShotsTotal?C.blue:C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:anyShotsTotal?'pointer':'not-allowed',opacity:anyShotsTotal?1:0.4}} title="PPT 생성">
-            {pptLoading
-              ? <div style={{width:18,height:18,border:`2px solid ${C.blue}`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
-              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" stroke={anyShotsTotal?'#5B9BD5':C.dimmer} strokeWidth="1.6"/><path d="M7 8h5a2 2 0 010 4H7V8z" stroke={anyShotsTotal?'#5B9BD5':C.dimmer} strokeWidth="1.4" fill="none"/><path d="M7 15h6M7 12h4" stroke={anyShotsTotal?'#5B9BD5':C.dimmer} strokeWidth="1.4" strokeLinecap="round"/></svg>}
+            Drive 업로드 + PPT
           </button>
         </div>
       </div>
