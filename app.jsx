@@ -39,6 +39,28 @@ const shotCount = (p, segments) => {
 };
 const emptyCapture = () => ({ outer_race: [], inner_race: [], cage: [], ball: [] });
 
+// ─── 제품별 촬영 비율 (w:h) ───────────────────────────────────
+const CROP_RATIO = {
+  outer_race: [3, 4],  // 세로
+  inner_race: [3, 4],  // 세로
+  cage:       [8, 3],  // 가로 와이드
+  ball:       [4, 3],  // 가로
+};
+
+// 100×100 viewBox 기준 가이드 프레임 좌표 계산
+function getGuideRect(productId) {
+  const [rw, rh] = CROP_RATIO[productId] || [4, 3];
+  if (rw >= rh) {
+    // 가로형 — 폭 기준
+    const w = 90, h = w * rh / rw;
+    return { x: (100-w)/2, y: (100-h)/2, w, h };
+  } else {
+    // 세로형 — 높이 기준
+    const h = 82, w = h * rw / rh;
+    return { x: (100-w)/2, y: (100-h)/2, w, h };
+  }
+}
+
 // ─── 부품 아이콘 ──────────────────────────────────────────────
 function ProductIcon({ id, color = C.text, size = 28 }) {
   const s = 1.6;
@@ -189,16 +211,32 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused, onCapt
   const handleShutter = useCallback(async () => {
     if (!videoRef.current || !camReady) return;
     setFlash(true); setTimeout(() => setFlash(false), 120);
-    const video  = videoRef.current;
+    const video = videoRef.current;
+    const vw    = video.videoWidth  || 1280;
+    const vh    = video.videoHeight || 720;
+    const [rw, rh] = CROP_RATIO[product.id] || [4, 3];
+
+    // 중앙 크롭: 목표 비율에 맞게 소스 영역 계산
+    let srcX, srcY, srcW, srcH;
+    if (vw / vh > rw / rh) {
+      // 비디오가 더 가로로 넓음 → 좌우 크롭
+      srcH = vh; srcW = vh * rw / rh;
+      srcX = (vw - srcW) / 2; srcY = 0;
+    } else {
+      // 비디오가 더 세로로 긺 → 상하 크롭
+      srcW = vw; srcH = vw * rh / rw;
+      srcX = 0; srcY = (vh - srcH) / 2;
+    }
+
     const canvas = document.createElement('canvas');
-    canvas.width  = video.videoWidth  || 1280;
-    canvas.height = video.videoHeight || 720;
-    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.width  = Math.round(srcW);
+    canvas.height = Math.round(srcH);
+    canvas.getContext('2d').drawImage(video, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
     canvas.toBlob(blob => {
       const url = URL.createObjectURL(blob);
       onCapture(blob, url);
     }, 'image/jpeg', 0.92);
-  }, [camReady, onCapture]);
+  }, [camReady, onCapture, product.id]);
 
   if (camError) return (
     <div style={{position:'absolute',inset:0,zIndex:100,background:C.bg,
@@ -225,11 +263,34 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused, onCapt
           style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>
         {flash && <div style={{position:'absolute',inset:0,background:'white',opacity:0.7,pointerEvents:'none'}}/>}
         <div style={{position:'absolute',inset:0,pointerEvents:'none'}}>
-          <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
-            <line x1="50" y1="40" x2="50" y2="60" stroke={`${C.accent}80`} strokeWidth="0.3"/>
-            <line x1="40" y1="50" x2="60" y2="50" stroke={`${C.accent}80`} strokeWidth="0.3"/>
-            <rect x="30" y="25" width="40" height="50" rx="1" fill="none" stroke={`${C.accent}40`} strokeWidth="0.5" strokeDasharray="2 2"/>
-          </svg>
+          {(() => {
+            const g = getGuideRect(product.id);
+            const cx = g.x + g.w / 2, cy = g.y + g.h / 2;
+            const hl = Math.min(g.w, g.h) * 0.12; // 코너 마커 길이
+            return (
+              <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
+                {/* 어두운 마스크 (가이드 바깥) */}
+                <rect x="0" y="0" width="100" height="100" fill="rgba(0,0,0,0.35)"/>
+                <rect x={g.x} y={g.y} width={g.w} height={g.h} fill="rgba(0,0,0,0)" style={{mixBlendMode:'destination-out'}}/>
+                {/* 가이드 프레임 테두리 */}
+                <rect x={g.x} y={g.y} width={g.w} height={g.h} rx="0.8"
+                  fill="none" stroke={`${C.accent}60`} strokeWidth="0.4" strokeDasharray="2 1.5"/>
+                {/* 코너 마커 */}
+                {[
+                  [g.x, g.y, 1, 1], [g.x+g.w, g.y, -1, 1],
+                  [g.x, g.y+g.h, 1, -1], [g.x+g.w, g.y+g.h, -1, -1],
+                ].map(([px, py, dx, dy], i) => (
+                  <g key={i} stroke={C.accent} strokeWidth="0.8" strokeLinecap="round">
+                    <line x1={px} y1={py} x2={px + dx*hl} y2={py}/>
+                    <line x1={px} y1={py} x2={px} y2={py + dy*hl}/>
+                  </g>
+                ))}
+                {/* 중앙 크로스헤어 */}
+                <line x1={cx} y1={cy-3} x2={cx} y2={cy+3} stroke={`${C.accent}80`} strokeWidth="0.3"/>
+                <line x1={cx-3} y1={cy} x2={cx+3} y2={cy} stroke={`${C.accent}80`} strokeWidth="0.3"/>
+              </svg>
+            );
+          })()}
           <div style={{position:'absolute',top:16,left:0,right:0,display:'flex',justifyContent:'center'}}>
             <div style={{background:'rgba(0,0,0,0.6)',backdropFilter:'blur(8px)',
               border:`1px solid ${C.border}`,borderRadius:20,padding:'6px 16px',
@@ -457,13 +518,25 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
     if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || '파일 업로드 실패'); }
   };
 
+  // HANSAE 폴더 찾기 또는 생성
+  const findOrCreateHansae = async () => {
+    const q = encodeURIComponent(`name='HANSAE' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false`);
+    const res  = await fetch(`${DRIVE_FOLDER_URL}?q=${q}&fields=files(id,name)`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const data = await res.json();
+    if (data.files && data.files.length > 0) return data.files[0].id;
+    return await createFolder('HANSAE'); // 없으면 생성
+  };
+
   const startUpload = async () => {
     setPhase('uploading');
     try {
-      const now     = new Date();
-      const dateStr = now.toISOString().slice(0,10).replace(/-/g,'');
-      const timeStr = now.toTimeString().slice(0,8).replace(/:/g,'');
-      const rootId  = await createFolder(`JointReport_${dateStr}_${timeStr}`);
+      const now      = new Date();
+      const dateStr  = now.toISOString().slice(0,10).replace(/-/g,'');
+      const timeStr  = now.toTimeString().slice(0,8).replace(/:/g,'');
+      const hansaeId = await findOrCreateHansae();
+      const rootId   = await createFolder(`JointReport_${dateStr}_${timeStr}`, hansaeId);
 
       let total = 0;
       for (const side of SIDES) {
