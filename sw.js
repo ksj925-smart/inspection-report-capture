@@ -1,5 +1,5 @@
-const CACHE = 'bearing-capture-v1';
-const ASSETS = ['/', '/index.html', '/app.jsx', '/manifest.json'];
+const CACHE = 'bearing-capture-v4';
+const ASSETS = ['/', '/index.html', '/app.jsx', '/generate-ppt.js', '/google-config.js', '/manifest.json'];
 
 self.addEventListener('install', e => {
   e.waitUntil(
