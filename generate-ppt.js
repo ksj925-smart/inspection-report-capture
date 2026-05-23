@@ -32,7 +32,7 @@ const CROP_RATIO_PPT = {
   outer_race: [3, 4],
   inner_race: [3, 4],
   cage:       [8, 3],
-  ball:       [1, 1],
+  ball:       [4, 3],
 };
 
 const HDR_COLOR   = '1F5C8B';
@@ -51,7 +51,8 @@ function calcImageFit(maxW, maxH, rw, rh) {
 }
 
 // ── 제품 슬라이드 (N cols × auto rows) ─────────────────────────
-async function addProductSlide(pptx, title, shots, cols, ratioWH) {
+// labels: 셀 번호 문자열 배열 (null이면 #1~#N 자동 생성)
+async function addProductSlide(pptx, title, shots, cols, ratioWH, labels = null) {
   const [rw, rh] = ratioWH;
   const rows = Math.ceil(shots.length / cols);
 
@@ -84,7 +85,9 @@ async function addProductSlide(pptx, title, shots, cols, ratioWH) {
     const x   = marginX + col * cellW;
     const y   = startY  + row * cellH;
 
-    slide.addText(`#${i + 1}`, {
+    // 번호 레이블 (labels 배열 또는 #N 자동)
+    const labelText = labels ? labels[i] : `#${i + 1}`;
+    slide.addText(labelText, {
       x: x + imgPad, y: y + 0.02,
       w: cellW - imgPad * 2, h: lblH,
       fontSize: 8, color: DIM_COLOR, fontFace: 'Courier New',
@@ -113,7 +116,7 @@ async function addProductSlide(pptx, title, shots, cols, ratioWH) {
   }
 }
 
-// ── BALL 슬라이드 (중앙 1:1) ────────────────────────────────────
+// ── BALL 슬라이드 (중앙 4:3 가로) ─────────────────────────────
 async function addBallSlide(pptx, title, shot) {
   const slide = pptx.addSlide();
   slide.background = { color: BG_COLOR };
@@ -128,19 +131,21 @@ async function addBallSlide(pptx, title, shot) {
     fontFace: 'Arial',
   });
 
-  const size = 5.5;
-  const cx = (13.33 - size) / 2;
+  // 4:3 비율 이미지를 슬라이드 바디 중앙에 배치
+  const imgH  = 5.5;
+  const imgW  = imgH * (4 / 3);  // ≈ 7.33"
+  const cx    = (13.33 - imgW) / 2;
   const bodyH = 7.5 - 0.75;
-  const cy = 0.75 + (bodyH - size) / 2;
+  const cy    = 0.75 + (bodyH - imgH) / 2;
 
   slide.addText('#1', {
-    x: cx, y: cy - 0.28, w: size, h: 0.22,
+    x: cx, y: cy - 0.28, w: imgW, h: 0.22,
     fontSize: 9, color: DIM_COLOR, fontFace: 'Courier New', align: 'center',
   });
 
   if (shot && shot.blob) {
     const dataUrl = await blobToDataUrl(shot.blob);
-    slide.addImage({ data: dataUrl, x: cx, y: cy, w: size, h: size });
+    slide.addImage({ data: dataUrl, x: cx, y: cy, w: imgW, h: imgH });
   }
 }
 
@@ -214,9 +219,9 @@ window.generateJointReportPPT = async function({ capturedData, selectedSides, se
   for (const side of ['outboard', 'inboard']) {
     if (!selectedSides[side]) continue;
     const sideLabel = side === 'outboard' ? 'Outboard' : 'Inboard';
-    const segs = segments[side] || 6;
-    const cols = segs <= 6 ? 3 : 4;
-    const sideData = capturedData[side];
+    const segs      = segments[side] || 6;
+    const raceCols  = segs <= 6 ? 3 : 4;  // OUTER/INNER RACE 기본 cols
+    const sideData  = capturedData[side];
 
     for (const prod of PRODUCTS_DEF) {
       const shots = sideData[prod.id] || [];
@@ -225,12 +230,25 @@ window.generateJointReportPPT = async function({ capturedData, selectedSides, se
       const ratio = CROP_RATIO_PPT[prod.id];
 
       if (prod.id === 'ball') {
+        // BALL: 중앙 4:3 단일 슬라이드
         await addBallSlide(pptx, `BALL — ${sideLabel}`, shots[0]);
+
       } else if (prod.id === 'cage') {
-        // 앞·뒤 전체를 한 슬라이드에 (4 cols, 8:3 비율)
-        await addProductSlide(pptx, `CAGE — ${sideLabel}`, shots, 4, ratio);
+        // CAGE: 앞·뒤 전체를 1장에
+        //   6구간 → 3cols × 4rows (F1~F6, B1~B6)
+        //   8구간 → 4cols × 4rows (F1~F8, B1~B8)
+        const cageCols = segs <= 6 ? 3 : 4;
+        const cageLabels = [
+          ...Array.from({ length: segs }, (_, i) => `F${i + 1}`),  // 앞면
+          ...Array.from({ length: segs }, (_, i) => `B${i + 1}`),  // 뒷면
+        ];
+        await addProductSlide(
+          pptx, `CAGE — ${sideLabel}`, shots, cageCols, ratio, cageLabels
+        );
+
       } else {
-        await addProductSlide(pptx, `${prod.name} — ${sideLabel}`, shots, cols, ratio);
+        // OUTER RACE / INNER RACE (3:4)
+        await addProductSlide(pptx, `${prod.name} — ${sideLabel}`, shots, raceCols, ratio);
       }
     }
   }

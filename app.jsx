@@ -37,7 +37,7 @@ const CROP_RATIO = {
   outer_race: [3, 4],   // 세로
   inner_race: [3, 4],   // 세로
   cage:       [8, 3],   // 가로 와이드
-  ball:       [1, 1],   // 정사각형
+  ball:       [4, 3],   // 가로 4:3
 };
 
 const shotCount    = (p, seg) => p.id==='ball' ? 1 : p.id==='cage' ? seg*2 : seg;
