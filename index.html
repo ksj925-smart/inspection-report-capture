@@ -72,7 +72,7 @@
     ReactDOM.createRoot(document.getElementById('root')).render(<CaptureApp />);
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/bearing-capture/sw.js').catch(() => {});
+        navigator.serviceWorker.register('/inspection-report-capture/sw.js').catch(() => {});
       });
     }
   </script>

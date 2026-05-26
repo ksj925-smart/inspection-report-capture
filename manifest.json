@@ -2,7 +2,7 @@
   "name": "Joint Report",
   "short_name": "Joint Report",
   "description": "Joint 360° Inspection Report — 자동 촬영 및 Google Drive 업로드",
-  "start_url": "/bearing-capture/",
+  "start_url": "/inspection-report-capture/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0B0C0E",

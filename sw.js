@@ -1,4 +1,4 @@
-const CACHE = 'bearing-capture-v5';
+const CACHE = 'inspection-report-v1';
 const ASSETS = ['/', '/index.html', '/app.jsx', '/generate-ppt.js', '/google-config.js', '/manifest.json'];
 
 self.addEventListener('install', e => {
