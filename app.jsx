@@ -43,15 +43,16 @@ const CROP_RATIO = {
 const shotCount    = (p, seg) => p.id==='ball' ? 1 : p.id==='cage' ? seg*2 : seg;
 const emptyCapture = ()       => ({ outer_race:[], inner_race:[], cage:[], ball:[] });
 
-// 100×100 viewBox 기준 가이드 프레임 좌표
-function getGuideRect(productId) {
+// CSS aspect-ratio 기반 가이드 박스 스타일
+// preserveAspectRatio="none" SVG는 폰 세로화면에서 찌그러지므로 CSS 방식 사용
+function getGuideBoxStyle(productId) {
   const [rw, rh] = CROP_RATIO[productId] || [4, 3];
   if (rw >= rh) {
-    const w = 90, h = w * rh / rw;
-    return { x:(100-w)/2, y:(100-h)/2, w, h };
+    // 가로 비율(cage, ball): width 기준으로 맞춤
+    return { width:'90%', aspectRatio:`${rw}/${rh}` };
   } else {
-    const h = 82, w = h * rw / rh;
-    return { x:(100-w)/2, y:(100-h)/2, w, h };
+    // 세로 비율(outer/inner race): height 기준으로 맞춤
+    return { height:'80%', aspectRatio:`${rw}/${rh}` };
   }
 }
 
@@ -252,29 +253,38 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
           style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>
         {flash && <div style={{position:'absolute',inset:0,background:'white',opacity:0.7,pointerEvents:'none'}}/>}
 
-        {/* 가이드 프레임 */}
+        {/* 가이드 프레임 — CSS aspect-ratio 방식 (SVG stretch 문제 해결) */}
         <div style={{position:'absolute',inset:0,pointerEvents:'none'}}>
-          {(()=>{
-            const g=getGuideRect(product.id);
-            const cx=g.x+g.w/2, cy=g.y+g.h/2;
-            const hl=Math.min(g.w,g.h)*0.12;
-            return (
-              <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
-                <rect x="0" y="0" width="100" height="100" fill="rgba(0,0,0,0.3)"/>
-                <rect x={g.x} y={g.y} width={g.w} height={g.h} fill="rgba(0,0,0,0)" style={{mixBlendMode:'destination-out'}}/>
-                <rect x={g.x} y={g.y} width={g.w} height={g.h} rx="0.8"
-                  fill="none" stroke={`${C.accent}70`} strokeWidth="0.4" strokeDasharray="2 1.5"/>
-                {[[g.x,g.y,1,1],[g.x+g.w,g.y,-1,1],[g.x,g.y+g.h,1,-1],[g.x+g.w,g.y+g.h,-1,-1]].map(([px,py,dx,dy],i)=>(
-                  <g key={i} stroke={C.accent} strokeWidth="0.9" strokeLinecap="round">
-                    <line x1={px} y1={py} x2={px+dx*hl} y2={py}/>
-                    <line x1={px} y1={py} x2={px} y2={py+dy*hl}/>
-                  </g>
-                ))}
-                <line x1={cx} y1={cy-2.5} x2={cx} y2={cy+2.5} stroke={`${C.accent}80`} strokeWidth="0.25"/>
-                <line x1={cx-2.5} y1={cy} x2={cx+2.5} y2={cy} stroke={`${C.accent}80`} strokeWidth="0.25"/>
-              </svg>
-            );
-          })()}
+          {/* 어두운 오버레이 + 가이드 박스 */}
+          <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            {(()=>{
+              const boxStyle = getGuideBoxStyle(product.id);
+              const hl = 12; // 코너 마크 길이 (viewBox 100 기준 %)
+              return (
+                <div style={{
+                  ...boxStyle,
+                  position:'relative',
+                  flexShrink:0,
+                  // 가이드 박스 외부를 어둡게 (overflow:hidden 부모에서 클리핑됨)
+                  boxShadow:'0 0 0 9999px rgba(0,0,0,0.38)',
+                }}>
+                  {/* 테두리 + 코너 마크 SVG (박스 내부라 비율 정확) */}
+                  <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <rect x="0.5" y="0.5" width="99" height="99" rx="1"
+                      fill="none" stroke={`${C.accent}55`} strokeWidth="0.7" strokeDasharray="3 2.5"/>
+                    {[{px:0,py:0,dx:1,dy:1},{px:100,py:0,dx:-1,dy:1},{px:0,py:100,dx:1,dy:-1},{px:100,py:100,dx:-1,dy:-1}].map(({px,py,dx,dy},i)=>(
+                      <g key={i} stroke={C.accent} strokeWidth="2" strokeLinecap="round">
+                        <line x1={px} y1={py} x2={px+dx*hl} y2={py}/>
+                        <line x1={px} y1={py} x2={px} y2={py+dy*hl}/>
+                      </g>
+                    ))}
+                    <line x1="50" y1="47" x2="50" y2="53" stroke={`${C.accent}80`} strokeWidth="0.6"/>
+                    <line x1="47" y1="50" x2="53" y2="50" stroke={`${C.accent}80`} strokeWidth="0.6"/>
+                  </svg>
+                </div>
+              );
+            })()}
+          </div>
 
           {/* 상단 HUD */}
           <div style={{position:'absolute',top:14,left:0,right:0,display:'flex',justifyContent:'center'}}>
