@@ -294,23 +294,19 @@ async function addVisualSlide(pptx, visualData) {
   const secHdrH = 0.30;   // OBJ/IBJ 섹션 헤더 높이
   const lblH    = 0.26;   // 각 사진 셀 레이블 높이
   const cntH    = availH - secHdrH;                       // 레이아웃 내용 높이 = 6.28"
-  const jW      = 2.10;   // JOINT 열 폭
-  const rW      = sW - jW;                                // 우측 사진 영역 폭 = 4.34"
+  const jW      = +(sW * 0.25).toFixed(3);  // JOINT 열 폭 = 섹션 폭의 25% ≈ 1.61"
+  const rW      = +(sW - jW).toFixed(3);                  // 우측 사진 영역 폭 ≈ 4.83"
   const pad     = 0.05;   // 사진 내부 여백
 
-  // ── 셀 폭 (루프 밖 공통 계산 — float 통일) ───────────────────
-  const cellW12 = rW / 2;   // Row1 셀 폭 ≈ 2.17"
-  const cellW3  = rW / 3;   // Row2 셀 폭 ≈ 1.45"
+  // ── 셀 폭 (루프 밖 공통 계산) ────────────────────────────────
+  const cellW12 = +(rW / 2).toFixed(3);   // Row1 셀 폭 ≈ 2.42"
+  const cellW3  = +(rW / 3).toFixed(3);   // Row2 셀 폭 ≈ 1.61"
 
-  // Row2 셀 높이: #4 BOOT(4:3)의 자연 높이를 기준으로 결정
-  //   cellW3 폭에서 4:3 사진이 꽉 차는 높이 = lblH + (cellW3−2·pad)·(3/4) + 2·pad ≈ 1.45"
-  const r2PhotoW   = cellW3 - pad * 2;
-  const row2CellH  = +(lblH + r2PhotoW * (3 / 4) + pad * 2).toFixed(3); // 고정값
-  const row2PhotoH = row2CellH - lblH;
-
-  // Row1 셀 높이: JOINT 컬럼과 완전히 맞게 (row1 + row2 = cntH)
-  const row1CellH  = +(cntH - row2CellH).toFixed(3);
+  // ── 세로 배분: Row1 45% / Row2 45% / 여백 10% ────────────────
+  const row1CellH  = +(cntH * 0.45).toFixed(3);  // ≈ 2.83"
+  const row2CellH  = row1CellH;                   // 동일 고정값 (완전히 같은 높이)
   const row1PhotoH = row1CellH - lblH;
+  const row2PhotoH = row2CellH - lblH;
 
   // 섹션 중간 구분선
   const divX = margin + sW + secGap / 2 - 0.008;
@@ -340,11 +336,12 @@ async function addVisualSlide(pptx, visualData) {
     });
 
     // ── JOINT 열 (좌측) ──────────────────────────────────────
-    const jX = sX;
+    const jX        = sX;
+    const jointCellH = row1CellH + row2CellH;   // Row1+Row2 높이 합 (= 90% of cntH)
 
-    // JOINT 전체 셀 테두리
+    // JOINT 전체 셀 테두리 (두 행 전체 높이)
     slide.addShape('rect', {
-      x: jX, y: yCnt, w: jW, h: cntH,
+      x: jX, y: yCnt, w: jW, h: jointCellH,
       fill: { type: 'none' },
       line: { color: T.cellBorder, width: 0.5 },
     });
@@ -361,7 +358,7 @@ async function addVisualSlide(pptx, visualData) {
     });
 
     // JOINT 사진 (9:16 세로, contain-fit)
-    const jPhotoAreaH = cntH - lblH;   // 6.02"
+    const jPhotoAreaH = jointCellH - lblH;
     const jdata = (visualData[side] || {})['joint'];
     if (jdata && jdata.blob) {
       const url = await blobToDataUrl(jdata.blob);
