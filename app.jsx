@@ -34,21 +34,22 @@ const SIDE_LABEL = { outboard:'Outboard', inboard:'Inboard' };
 
 // ─── Visual Inspection 항목 정의 ──────────────────────────────
 const VISUAL_ITEMS = [
-  { id:'joint',        name:'JOINT',             filename:'JOINT.jpg' },
-  { id:'interface',    name:'1. INTERFACE',      filename:'1_INTERFACE.jpg' },
-  { id:'bearing_face', name:'2. BEARING FACE',   filename:'2_BEARING_FACE.jpg' },
-  { id:'clamp_joint',  name:'3. CLAMP — JOINT',  filename:'3_CLAMP_JOINT.jpg' },
-  { id:'boot',         name:'4. BOOT',           filename:'4_BOOT.jpg' },
-  { id:'clamp_shaft',  name:'5. CLAMP — SHAFT',  filename:'5_CLAMP_SHAFT.jpg' },
+  { id:'joint',        name:'JOINT',             filename:'JOINT.jpg',           ratioKey:'outer_race'   },  // 3:4 세로
+  { id:'interface',    name:'1. INTERFACE',      filename:'1_INTERFACE.jpg',     ratioKey:'ball'         },  // 4:3 가로
+  { id:'bearing_face', name:'2. BEARING FACE',   filename:'2_BEARING_FACE.jpg',  ratioKey:'ball'         },  // 4:3 가로
+  { id:'clamp_joint',  name:'3. CLAMP — JOINT',  filename:'3_CLAMP_JOINT.jpg',   ratioKey:'portrait_916' },  // 9:16 세로
+  { id:'boot',         name:'4. BOOT',           filename:'4_BOOT.jpg',          ratioKey:'ball'         },  // 4:3 가로
+  { id:'clamp_shaft',  name:'5. CLAMP — SHAFT',  filename:'5_CLAMP_SHAFT.jpg',   ratioKey:'portrait_916' },  // 9:16 세로
 ];
 const emptyVisual = () => Object.fromEntries(VISUAL_ITEMS.map(it => [it.id, null]));
 
 // ─── 제품별 촬영 비율 (w:h) ───────────────────────────────────
 const CROP_RATIO = {
-  outer_race: [3, 4],   // 세로
-  inner_race: [3, 4],   // 세로
-  cage:       [8, 3],   // 가로 와이드
-  ball:       [4, 3],   // 가로 4:3
+  outer_race:   [3, 4],   // 세로
+  inner_race:   [3, 4],   // 세로
+  cage:         [8, 3],   // 가로 와이드
+  ball:         [4, 3],   // 가로 4:3
+  portrait_916: [9, 16],  // 세로 9:16 (CLAMP-JOINT, CLAMP-SHAFT)
 };
 
 const shotCount    = (p, seg) => p.id==='ball' ? 1 : p.id==='cage' ? seg*2 : seg;
@@ -1008,7 +1009,7 @@ function CaptureApp() {
     return (
       <div style={{height:'100%',position:'relative',background:'#000'}}>
         <CameraScreen
-          product={{ id:'ball', name:vit?.name||'' }}
+          product={{ id: vit?.ratioKey || 'ball', name:vit?.name||'' }}
           segments={1} shotIndex={0} totalShots={1} paused={false}
           capturedImages={[]}
           onCapture={handleVisualCapture}

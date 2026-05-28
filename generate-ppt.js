@@ -249,16 +249,6 @@ function addCoverSlide(pptx, selectedSides, date) {
   });
 }
 
-// ── Visual Inspection PPT 항목 정의 ────────────────────────────
-const VISUAL_ITEMS_PPT = [
-  { id:'joint',        label:'JOINT' },
-  { id:'interface',    label:'INTERFACE' },
-  { id:'bearing_face', label:'BEARING\nFACE' },
-  { id:'clamp_joint',  label:'CLAMP\nJOINT' },
-  { id:'boot',         label:'BOOT' },
-  { id:'clamp_shaft',  label:'CLAMP\nSHAFT' },
-];
-
 // ── Visual 표지 슬라이드 ────────────────────────────────────────
 function addVisualCoverSlide(pptx, date) {
   const slide = pptx.addSlide();
@@ -278,6 +268,17 @@ function addVisualCoverSlide(pptx, date) {
 }
 
 // ── Visual Inspection 슬라이드 ─────────────────────────────────
+// 레이아웃 (13.33" × 7.5" WIDE):
+//  좌절반: OUTBOARD(OBJ)  /  우절반: INBOARD(IBJ)
+//  각 섹션:
+//    ┌──────────────────────────────────────────────────┐
+//    │  OBJ / IBJ  — 섹션 헤더 (네이비, 전체폭)          │ h=0.30"
+//    ├──────────┬───────────────────────────────────────┤
+//    │ OBJ/IBJ  │ Row1: [#1 4:3] | [#2 4:3]            │ h=rowH
+//    │  레이블  ├───────────────────────────────────────┤
+//    │  3:4     │ Row2: [#3 9:16]|[#4 4:3]|[#5 9:16]   │ h=rowH
+//    │  JOINT   │                                       │
+//    └──────────┴───────────────────────────────────────┘
 async function addVisualSlide(pptx, visualData) {
   const slide = pptx.addSlide();
   slide.background = { color: T.bgSlide };
@@ -285,66 +286,168 @@ async function addVisualSlide(pptx, visualData) {
   addSlideHeader(slide, 'Joint Visual Inspection');
 
   const sides   = ['outboard', 'inboard'];
-  const sW      = 6.40;
   const margin  = 0.12;
-  const gap     = 0.21;
+  const secGap  = 0.21;                                   // 섹션 간 간격
+  const sW      = (13.33 - margin * 2 - secGap) / 2;     // 각 섹션 폭 = 6.44"
   const startY  = 0.82;
+  const availH  = 7.5 - startY - 0.10;                   // 콘텐츠 높이 = 6.58"
+  const secHdrH = 0.30;   // OBJ/IBJ 섹션 헤더 높이
+  const lblH    = 0.26;   // 각 사진 셀 레이블 높이
+  const cntH    = availH - secHdrH;                       // 레이아웃 내용 높이 = 6.28"
+  const jW      = 2.10;   // JOINT 열 폭
+  const rW      = sW - jW;                                // 우측 사진 영역 폭 = 4.34"
+  const rowH    = cntH / 2;                               // 상·하 행 높이 = 3.14"
+  const photoH  = rowH - lblH;                            // 사진 표시 높이 = 2.88"
+  const pad     = 0.05;   // 사진 내부 여백
+
+  // 섹션 중간 구분선
+  const divX = margin + sW + secGap / 2 - 0.008;
+  slide.addShape('rect', {
+    x: divX, y: startY, w: 0.016, h: availH,
+    fill: { color: T.cellBorder }, line: { type: 'none' },
+  });
 
   for (let idx = 0; idx < sides.length; idx++) {
-    const side   = sides[idx];
-    const sX     = margin + idx * (sW + gap);
-    const sLabel = side === 'outboard' ? 'OBJ — OUTBOARD' : 'IBJ — INBOARD';
+    const side    = sides[idx];
+    const sX      = margin + idx * (sW + secGap);
+    const sLabel  = side === 'outboard' ? 'OBJ  —  OUTBOARD' : 'IBJ  —  INBOARD';
+    const jLabel  = side === 'outboard' ? 'OBJ' : 'IBJ';
 
-    // 섹션 헤더 바
-    slide.addShape('rect', { x:sX, y:startY, w:sW, h:0.30, fill:{color:T.hdrCell}, line:{type:'none'} });
-    slide.addText(sLabel, { x:sX, y:startY, w:sW, h:0.30, fontSize:11, bold:true, color:T.hdrText, fontFace:'Arial', align:'center', valign:'middle' });
+    const ySH  = startY;                 // 섹션 헤더 y
+    const yCnt = startY + secHdrH;       // 콘텐츠 시작 y = 1.12"
 
-    // JOINT 레이블 셀
-    const jLblY = startY + 0.30;
-    const jImgY = jLblY + 0.26;
-    const jH    = 4.30;
+    // ── 섹션 헤더 (전체 폭, 네이비) ──────────────────────────
+    slide.addShape('rect', {
+      x: sX, y: ySH, w: sW, h: secHdrH,
+      fill: { color: '1F5C8B' }, line: { type: 'none' },
+    });
+    slide.addText(sLabel, {
+      x: sX, y: ySH, w: sW, h: secHdrH,
+      fontSize: 11, bold: true, color: 'FFFFFF',
+      fontFace: 'Arial', align: 'center', valign: 'middle',
+    });
 
-    slide.addShape('rect', { x:sX, y:jLblY, w:sW, h:0.26, fill:{color:T.hdrCell}, line:{type:'none'} });
-    slide.addText('JOINT', { x:sX, y:jLblY, w:sW, h:0.26, fontSize:10, bold:true, color:T.hdrText, fontFace:'Arial', align:'center', valign:'middle' });
+    // ── JOINT 열 (좌측) ──────────────────────────────────────
+    const jX = sX;
 
-    // JOINT 테두리
-    slide.addShape('rect', { x:sX, y:jLblY, w:sW, h:0.26+jH, fill:{type:'none'}, line:{color:T.cellBorder, width:0.5} });
+    // JOINT 전체 셀 테두리
+    slide.addShape('rect', {
+      x: jX, y: yCnt, w: jW, h: cntH,
+      fill: { type: 'none' },
+      line: { color: T.cellBorder, width: 0.5 },
+    });
 
-    // JOINT 이미지
-    const jdata = (visualData[side]||{})['joint'];
+    // JOINT 레이블 (OBJ/IBJ, 네이비)
+    slide.addShape('rect', {
+      x: jX, y: yCnt, w: jW, h: lblH,
+      fill: { color: T.hdrCell }, line: { type: 'none' },
+    });
+    slide.addText(jLabel, {
+      x: jX, y: yCnt, w: jW, h: lblH,
+      fontSize: 10, bold: true, color: T.hdrText,
+      fontFace: 'Arial', align: 'center', valign: 'middle',
+    });
+
+    // JOINT 사진 (3:4 세로, contain-fit)
+    const jPhotoAreaH = cntH - lblH;   // 6.02"
+    const jdata = (visualData[side] || {})['joint'];
     if (jdata && jdata.blob) {
       const url = await blobToDataUrl(jdata.blob);
-      const pad = 0.06;
-      const fit = calcImageFit(sW - pad*2, jH - pad*2, 4, 3);
-      slide.addImage({ data:url, x:sX+pad+fit.offX, y:jImgY+pad+fit.offY, w:fit.w, h:fit.h });
+      const fit = calcImageFit(jW - pad * 2, jPhotoAreaH - pad * 2, 3, 4);
+      slide.addImage({
+        data: url,
+        x: jX + pad + fit.offX,
+        y: yCnt + lblH + pad + fit.offY,
+        w: fit.w,
+        h: fit.h,
+      });
     }
 
-    // 1~5 항목 (5열 배치)
-    const numY    = jImgY + jH + 0.05;
-    const numItems = VISUAL_ITEMS_PPT.slice(1);   // JOINT 제외
-    const cellW   = sW / 5;
-    const lblH    = 0.28;
-    const availH  = 7.5 - 0.1 - numY;
-    const imgH    = Math.min(availH - lblH, cellW * 0.75);  // 4:3 비율
+    // ── 우측 사진 영역 ───────────────────────────────────────
+    const rX = sX + jW;
 
-    for (let i = 0; i < numItems.length; i++) {
-      const item  = numItems[i];
-      const cellX = sX + i * cellW;
+    // ── Row 1: #1 INTERFACE (4:3) + #2 BEARING FACE (4:3) ──
+    const row1Y   = yCnt;
+    const cellW12 = rW / 2;            // 2.17"
+    const row1Items = [
+      { id: 'interface',    label: '#1', ratio: [4, 3] },
+      { id: 'bearing_face', label: '#2', ratio: [4, 3] },
+    ];
 
-      // 레이블 셀 (네이비)
-      slide.addShape('rect', { x:cellX, y:numY, w:cellW, h:lblH, fill:{color:T.hdrCell}, line:{type:'none'} });
-      slide.addText(item.label, { x:cellX, y:numY, w:cellW, h:lblH, fontSize:7, bold:true, color:T.hdrText, fontFace:'Arial', align:'center', valign:'middle' });
+    for (let i = 0; i < row1Items.length; i++) {
+      const item  = row1Items[i];
+      const cellX = rX + i * cellW12;
+      const cellY = row1Y;
 
-      // 셀 테두리
-      slide.addShape('rect', { x:cellX, y:numY, w:cellW, h:lblH+imgH, fill:{type:'none'}, line:{color:T.cellBorder, width:0.5} });
+      slide.addShape('rect', {
+        x: cellX, y: cellY, w: cellW12, h: rowH,
+        fill: { type: 'none' },
+        line: { color: T.cellBorder, width: 0.5 },
+      });
+      slide.addShape('rect', {
+        x: cellX, y: cellY, w: cellW12, h: lblH,
+        fill: { color: T.hdrCell }, line: { type: 'none' },
+      });
+      slide.addText(item.label, {
+        x: cellX, y: cellY, w: cellW12, h: lblH,
+        fontSize: 10, bold: true, color: T.hdrText,
+        fontFace: 'Arial', align: 'center', valign: 'middle',
+      });
 
-      // 이미지
-      const idata = (visualData[side]||{})[item.id];
+      const idata = (visualData[side] || {})[item.id];
       if (idata && idata.blob) {
         const url = await blobToDataUrl(idata.blob);
-        const pad = 0.04;
-        const fit = calcImageFit(cellW - pad*2, imgH - pad*2, 4, 3);
-        slide.addImage({ data:url, x:cellX+pad+fit.offX, y:numY+lblH+pad+fit.offY, w:fit.w, h:fit.h });
+        const fit = calcImageFit(cellW12 - pad * 2, photoH - pad * 2, item.ratio[0], item.ratio[1]);
+        slide.addImage({
+          data: url,
+          x: cellX + pad + fit.offX,
+          y: cellY + lblH + pad + fit.offY,
+          w: fit.w,
+          h: fit.h,
+        });
+      }
+    }
+
+    // ── Row 2: #3 CLAMP-JOINT (9:16) + #4 BOOT (4:3) + #5 CLAMP-SHAFT (9:16) ──
+    const row2Y  = yCnt + rowH;
+    const cellW3 = rW / 3;             // 1.447"
+    const row2Items = [
+      { id: 'clamp_joint',  label: '#3', ratio: [9, 16] },
+      { id: 'boot',         label: '#4', ratio: [4, 3]  },
+      { id: 'clamp_shaft',  label: '#5', ratio: [9, 16] },
+    ];
+
+    for (let i = 0; i < row2Items.length; i++) {
+      const item  = row2Items[i];
+      const cellX = rX + i * cellW3;
+      const cellY = row2Y;
+
+      slide.addShape('rect', {
+        x: cellX, y: cellY, w: cellW3, h: rowH,
+        fill: { type: 'none' },
+        line: { color: T.cellBorder, width: 0.5 },
+      });
+      slide.addShape('rect', {
+        x: cellX, y: cellY, w: cellW3, h: lblH,
+        fill: { color: T.hdrCell }, line: { type: 'none' },
+      });
+      slide.addText(item.label, {
+        x: cellX, y: cellY, w: cellW3, h: lblH,
+        fontSize: 10, bold: true, color: T.hdrText,
+        fontFace: 'Arial', align: 'center', valign: 'middle',
+      });
+
+      const idata = (visualData[side] || {})[item.id];
+      if (idata && idata.blob) {
+        const url = await blobToDataUrl(idata.blob);
+        const fit = calcImageFit(cellW3 - pad * 2, photoH - pad * 2, item.ratio[0], item.ratio[1]);
+        slide.addImage({
+          data: url,
+          x: cellX + pad + fit.offX,
+          y: cellY + lblH + pad + fit.offY,
+          w: fit.w,
+          h: fit.h,
+        });
       }
     }
   }
