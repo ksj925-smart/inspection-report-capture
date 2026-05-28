@@ -296,9 +296,21 @@ async function addVisualSlide(pptx, visualData) {
   const cntH    = availH - secHdrH;                       // 레이아웃 내용 높이 = 6.28"
   const jW      = 2.10;   // JOINT 열 폭
   const rW      = sW - jW;                                // 우측 사진 영역 폭 = 4.34"
-  const rowH    = cntH / 2;                               // 상·하 행 높이 = 3.14"
-  const photoH  = rowH - lblH;                            // 사진 표시 높이 = 2.88"
   const pad     = 0.05;   // 사진 내부 여백
+
+  // ── 셀 폭 (루프 밖 공통 계산 — float 통일) ───────────────────
+  const cellW12 = rW / 2;   // Row1 셀 폭 ≈ 2.17"
+  const cellW3  = rW / 3;   // Row2 셀 폭 ≈ 1.45"
+
+  // Row2 셀 높이: #4 BOOT(4:3)의 자연 높이를 기준으로 결정
+  //   cellW3 폭에서 4:3 사진이 꽉 차는 높이 = lblH + (cellW3−2·pad)·(3/4) + 2·pad ≈ 1.45"
+  const r2PhotoW   = cellW3 - pad * 2;
+  const row2CellH  = +(lblH + r2PhotoW * (3 / 4) + pad * 2).toFixed(3); // 고정값
+  const row2PhotoH = row2CellH - lblH;
+
+  // Row1 셀 높이: JOINT 컬럼과 완전히 맞게 (row1 + row2 = cntH)
+  const row1CellH  = +(cntH - row2CellH).toFixed(3);
+  const row1PhotoH = row1CellH - lblH;
 
   // 섹션 중간 구분선
   const divX = margin + sW + secGap / 2 - 0.008;
@@ -367,20 +379,20 @@ async function addVisualSlide(pptx, visualData) {
     const rX = sX + jW;
 
     // ── Row 1: #1 INTERFACE (4:3) + #2 BEARING FACE (4:3) ──
-    const row1Y   = yCnt;
-    const cellW12 = rW / 2;            // 2.17"
-    const row1Items = [
+    // row1CellH = cntH - row2CellH (Row2 확정 후 나머지 전부)
+    const row1Y    = yCnt;
+    const row1Defs = [
       { id: 'interface',    label: '#1', ratio: [4, 3] },
       { id: 'bearing_face', label: '#2', ratio: [4, 3] },
     ];
 
-    for (let i = 0; i < row1Items.length; i++) {
-      const item  = row1Items[i];
+    for (let i = 0; i < row1Defs.length; i++) {
+      const item  = row1Defs[i];
       const cellX = rX + i * cellW12;
       const cellY = row1Y;
 
       slide.addShape('rect', {
-        x: cellX, y: cellY, w: cellW12, h: rowH,
+        x: cellX, y: cellY, w: cellW12, h: row1CellH,
         fill: { type: 'none' },
         line: { color: T.cellBorder, width: 0.5 },
       });
@@ -397,7 +409,7 @@ async function addVisualSlide(pptx, visualData) {
       const idata = (visualData[side] || {})[item.id];
       if (idata && idata.blob) {
         const url = await blobToDataUrl(idata.blob);
-        const fit = calcImageFit(cellW12 - pad * 2, photoH - pad * 2, item.ratio[0], item.ratio[1]);
+        const fit = calcImageFit(cellW12 - pad * 2, row1PhotoH - pad * 2, item.ratio[0], item.ratio[1]);
         slide.addImage({
           data: url,
           x: cellX + pad + fit.offX,
@@ -409,18 +421,13 @@ async function addVisualSlide(pptx, visualData) {
     }
 
     // ── Row 2: #3 CLAMP-JOINT (9:16) + #4 BOOT (4:3) + #5 CLAMP-SHAFT (9:16) ──
-    // row2CellH: float 연산 없이 리터럴로 고정 → 세 칸 완전히 동일한 높이 보장
-    const row2Y      = yCnt + rowH;
-    const row2CellH  = rowH;                // 3.14" 고정 (float drift 방지용 별도 변수)
-    const row2PhotoH = row2CellH - lblH;    // 레이블 제외 사진 영역 = 2.88"
-    const cellW3     = rW / 3;             // 1.447"
-
-    // #3/#5: 9:16 세로 (세로 중앙 정렬)
-    // #4: 4:3 가로이지만 칸 높이 동일, 사진은 상단 정렬 (짧은 사진이 중앙에 뜨는 현상 제거)
+    // 세 칸 모두 row2CellH (고정값) 사용 → 픽셀 단위 동일 보장
+    // row2CellH = #4 BOOT(4:3)의 자연 높이 기준 ≈ 1.45"
+    const row2Y    = yCnt + row1CellH;   // Row1 바로 아래
     const row2Defs = [
-      { id: 'clamp_joint',  label: '#3', ratio: [9, 16], topAlign: false },
-      { id: 'boot',         label: '#4', ratio: [4, 3],  topAlign: true  },
-      { id: 'clamp_shaft',  label: '#5', ratio: [9, 16], topAlign: false },
+      { id: 'clamp_joint',  label: '#3', ratio: [9, 16] },
+      { id: 'boot',         label: '#4', ratio: [4, 3]  },
+      { id: 'clamp_shaft',  label: '#5', ratio: [9, 16] },
     ];
 
     for (let i = 0; i < row2Defs.length; i++) {
@@ -428,13 +435,12 @@ async function addVisualSlide(pptx, visualData) {
       const cellX = rX + i * cellW3;
       const cellY = row2Y;
 
-      // 셀 테두리 — 세 칸 모두 동일한 row2CellH 사용
+      // 세 칸 완전히 동일한 row2CellH (h값 고정)
       slide.addShape('rect', {
         x: cellX, y: cellY, w: cellW3, h: row2CellH,
         fill: { type: 'none' },
         line: { color: T.cellBorder, width: 0.5 },
       });
-      // 레이블 배경
       slide.addShape('rect', {
         x: cellX, y: cellY, w: cellW3, h: lblH,
         fill: { color: T.hdrCell }, line: { type: 'none' },
@@ -448,13 +454,12 @@ async function addVisualSlide(pptx, visualData) {
       const idata = (visualData[side] || {})[item.id];
       if (idata && idata.blob) {
         const url = await blobToDataUrl(idata.blob);
+        // contain-fit 중앙 정렬 (#3/#5는 9:16 → 좌우 여백, #4는 4:3 → 상하 여백)
         const fit = calcImageFit(cellW3 - pad * 2, row2PhotoH - pad * 2, item.ratio[0], item.ratio[1]);
-        // topAlign=true(#4 BOOT): 상단 정렬(offY=0) / false(#3,#5): 세로 중앙 정렬
-        const photoOffY = item.topAlign ? 0 : fit.offY;
         slide.addImage({
           data: url,
           x: cellX + pad + fit.offX,
-          y: cellY + lblH + pad + photoOffY,
+          y: cellY + lblH + pad + fit.offY,
           w: fit.w,
           h: fit.h,
         });
