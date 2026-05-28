@@ -32,6 +32,17 @@ const PRODUCTS = [
 const SIDES      = ['outboard', 'inboard'];
 const SIDE_LABEL = { outboard:'Outboard', inboard:'Inboard' };
 
+// ─── Visual Inspection 항목 정의 ──────────────────────────────
+const VISUAL_ITEMS = [
+  { id:'joint',        name:'JOINT',             filename:'JOINT.jpg' },
+  { id:'interface',    name:'1. INTERFACE',      filename:'1_INTERFACE.jpg' },
+  { id:'bearing_face', name:'2. BEARING FACE',   filename:'2_BEARING_FACE.jpg' },
+  { id:'clamp_joint',  name:'3. CLAMP — JOINT',  filename:'3_CLAMP_JOINT.jpg' },
+  { id:'boot',         name:'4. BOOT',           filename:'4_BOOT.jpg' },
+  { id:'clamp_shaft',  name:'5. CLAMP — SHAFT',  filename:'5_CLAMP_SHAFT.jpg' },
+];
+const emptyVisual = () => Object.fromEntries(VISUAL_ITEMS.map(it => [it.id, null]));
+
 // ─── 제품별 촬영 비율 (w:h) ───────────────────────────────────
 const CROP_RATIO = {
   outer_race: [3, 4],   // 세로
@@ -675,6 +686,192 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
   );
 }
 
+// ─── VisualUploadModal ────────────────────────────────────────
+function VisualUploadModal({ visualData, accessToken, onClose, onDone }) {
+  const [phase,    setPhase]    = useState('confirm');
+  const [progress, setProgress] = useState({ current:0, total:0, name:'' });
+  const [errorMsg, setErrorMsg] = useState('');
+  const [driveLink,setDriveLink]= useState('');
+
+  const sessionInfo = useRef((() => {
+    const now = new Date();
+    const d = now.toISOString().slice(0,10).replace(/-/g,'');
+    const t = now.toTimeString().slice(0,8).replace(/:/g,'');
+    return { folderName:`JointReport_${d}_${t}` };
+  })()).current;
+
+  const createFolder = async (name, parentId=null) => {
+    const meta = { name, mimeType:'application/vnd.google-apps.folder', ...(parentId?{parents:[parentId]}:{}) };
+    const res  = await fetch(DRIVE_FOLDER_URL, { method:'POST', headers:{ Authorization:`Bearer ${accessToken}`, 'Content-Type':'application/json' }, body:JSON.stringify(meta) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message||'폴더 생성 실패');
+    return data.id;
+  };
+
+  const uploadFile = async (blob, filename, parentId, mimeType='image/jpeg') => {
+    const meta     = JSON.stringify({ name:filename, parents:[parentId] });
+    const boundary = '----FB' + Math.random().toString(36).slice(2);
+    const mb = new TextEncoder().encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`);
+    const eb = new TextEncoder().encode(`\r\n--${boundary}--`);
+    const ab = await blob.arrayBuffer();
+    const body = new Uint8Array(mb.byteLength + ab.byteLength + eb.byteLength);
+    body.set(mb,0); body.set(new Uint8Array(ab), mb.byteLength); body.set(eb, mb.byteLength+ab.byteLength);
+    const res = await fetch(DRIVE_UPLOAD_URL, { method:'POST', headers:{ Authorization:`Bearer ${accessToken}`, 'Content-Type':`multipart/related; boundary=${boundary}` }, body });
+    if (!res.ok) { const e=await res.json(); throw new Error(e.error?.message||'업로드 실패'); }
+  };
+
+  const findOrCreateHansae = async () => {
+    const q   = encodeURIComponent(`name='HANSAE' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false`);
+    const res = await fetch(`${DRIVE_FOLDER_URL}?q=${q}&fields=files(id,name)`, { headers:{ Authorization:`Bearer ${accessToken}` } });
+    const data = await res.json();
+    if (data.files && data.files.length>0) return data.files[0].id;
+    return await createFolder('HANSAE');
+  };
+
+  const totalShots = SIDES.reduce((s, side) =>
+    s + VISUAL_ITEMS.filter(it => visualData[side][it.id]).length, 0);
+
+  const startUpload = async () => {
+    setPhase('uploading');
+    try {
+      const hansaeId  = await findOrCreateHansae();
+      const rootId    = await createFolder(sessionInfo.folderName, hansaeId);
+      const visualId  = await createFolder('Visual_Inspection', rootId);
+
+      let current = 0;
+      for (const side of SIDES) {
+        const captured = VISUAL_ITEMS.filter(it => visualData[side][it.id]);
+        if (captured.length === 0) continue;
+        const sideId = await createFolder(SIDE_LABEL[side], visualId);
+        for (const item of captured) {
+          const shot = visualData[side][item.id];
+          setProgress({ current:++current, total:totalShots, name:`${SIDE_LABEL[side]} · ${item.name}` });
+          await uploadFile(shot.blob, item.filename, sideId);
+        }
+      }
+
+      // Visual PPT 생성 및 업로드
+      setPhase('ppt');
+      if (window.generateVisualPPT) {
+        const { blob:pptBlob, fileName:pptName } = await window.generateVisualPPT({ visualData });
+        await uploadFile(pptBlob, pptName, rootId,
+          'application/vnd.openxmlformats-officedocument.presentationml.presentation');
+      }
+
+      setDriveLink(`https://drive.google.com/drive/folders/${rootId}`);
+      setPhase('done');
+    } catch(err) { setErrorMsg(err.message); setPhase('error'); }
+  };
+
+  const canClose = phase==='confirm'||phase==='done'||phase==='error';
+
+  return (
+    <div style={{position:'absolute',inset:0,zIndex:200,background:'rgba(0,0,0,0.75)',backdropFilter:'blur(8px)',display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={canClose?onClose:undefined}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C.surface,border:`1px solid ${C.borderHi}`,borderRadius:'20px 20px 0 0',width:'100%',maxWidth:480,padding:24,paddingBottom:'max(24px,env(safe-area-inset-bottom))'}}>
+
+        {phase==='confirm' && (<>
+          <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:20}}>
+            <div style={{width:44,height:44,borderRadius:22,background:`${C.blue}25`,border:`1px solid ${C.blue}60`,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke={C.blue} strokeWidth="1.7"/><circle cx="9" cy="11" r="1.5" fill={C.blue}/><path d="M3 17l5-4 4 3 4-3 5 4" stroke={C.blue} strokeWidth="1.6" fill="none"/></svg>
+            </div>
+            <div>
+              <div style={{fontSize:17,fontWeight:700,color:C.text}}>Visual Inspection 업로드</div>
+              <div style={{fontSize:12,color:C.dim,marginTop:2}}>사진 + PPT 파일을 Drive에 저장합니다</div>
+            </div>
+          </div>
+          <div style={{background:C.bg,borderRadius:12,padding:'14px 16px',marginBottom:10}}>
+            {SIDES.map(side => {
+              const cnt = VISUAL_ITEMS.filter(it=>visualData[side][it.id]).length;
+              if (cnt===0) return null;
+              return (
+                <div key={side} style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                  <span style={{fontSize:13,color:C.text,fontWeight:600}}>{SIDE_LABEL[side]}</span>
+                  <span style={{fontFamily:FONT_MONO,fontSize:13,color:C.blue}}>{cnt} / {VISUAL_ITEMS.length}장</span>
+                </div>
+              );
+            })}
+            <div style={{height:1,background:C.border,margin:'4px 0 8px'}}/>
+            <div style={{display:'flex',justifyContent:'space-between'}}>
+              <span style={{fontSize:13,color:C.dim}}>총</span>
+              <span style={{fontFamily:FONT_MONO,fontSize:16,fontWeight:700,color:C.blue}}>{totalShots}장</span>
+            </div>
+          </div>
+          <div style={{background:C.bg,borderRadius:10,padding:'10px 14px',marginBottom:20,display:'flex',alignItems:'flex-start',gap:8}}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{marginTop:2,flexShrink:0}}><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke={C.dim} strokeWidth="1.5"/></svg>
+            <div style={{fontSize:11,color:C.dim,fontFamily:FONT_MONO,lineHeight:1.6}}>
+              내 드라이브 &gt; HANSAE &gt;<br/>
+              <span style={{color:C.text}}>{sessionInfo.folderName}</span><br/>
+              <span style={{color:C.dimmer}}>&gt; Visual_Inspection/</span>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={onClose} style={{flex:1,height:48,borderRadius:12,background:'none',border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>취소</button>
+            <button onClick={startUpload} style={{flex:2,height:48,borderRadius:12,background:C.blue,color:'#fff',fontSize:14,fontWeight:700,fontFamily:FONT_SANS,border:'none',cursor:'pointer'}}>
+              업로드 시작
+            </button>
+          </div>
+        </>)}
+
+        {phase==='uploading' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{width:64,height:64,borderRadius:32,margin:'0 auto 20px',background:`${C.blue}25`,border:`1px solid ${C.blue}60`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <div style={{width:28,height:28,border:`3px solid ${C.blue}`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
+            </div>
+            <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>사진 업로드 중...</div>
+            <div style={{fontSize:13,color:C.dim,marginBottom:20}}>{progress.name} · {progress.current}/{progress.total}장</div>
+            <div style={{height:4,background:C.bg,borderRadius:2,overflow:'hidden'}}>
+              <div style={{height:'100%',background:C.blue,borderRadius:2,width:`${progress.total>0?(progress.current/progress.total)*100:0}%`,transition:'width 0.3s ease'}}/>
+            </div>
+          </div>
+        )}
+
+        {phase==='ppt' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{width:64,height:64,borderRadius:32,margin:'0 auto 20px',background:`${C.blue}25`,border:`1px solid ${C.blue}60`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <div style={{width:28,height:28,border:`3px solid #5B9BD5`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
+            </div>
+            <div style={{fontSize:16,fontWeight:700,color:C.text,marginBottom:6}}>Visual PPT 생성 중...</div>
+            <div style={{fontSize:13,color:C.dim}}>Drive에 PPT 파일을 저장하고 있습니다</div>
+          </div>
+        )}
+
+        {phase==='done' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{width:64,height:64,borderRadius:32,margin:'0 auto 20px',background:`${C.blue}25`,border:`1px solid ${C.blue}`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><path d="M6 14l6 6L22 8" stroke={C.blue} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </div>
+            <div style={{fontSize:18,fontWeight:700,color:C.text,marginBottom:6}}>업로드 완료!</div>
+            <div style={{fontSize:13,color:C.dim,marginBottom:6}}>사진 {totalShots}장 + Visual PPT가 Drive에 저장됐습니다</div>
+            <div style={{fontSize:10,color:C.dimmer,fontFamily:FONT_MONO,marginBottom:24,lineHeight:1.5}}>
+              HANSAE &gt; {sessionInfo.folderName}
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:8}}>
+              <a href={driveLink} target="_blank" rel="noopener noreferrer"
+                style={{display:'flex',alignItems:'center',justifyContent:'center',gap:8,height:48,borderRadius:12,background:C.blue,color:'#fff',textDecoration:'none',fontSize:14,fontWeight:700}}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                Drive에서 열기
+              </a>
+              <button onClick={onDone} style={{height:44,borderRadius:12,background:'none',border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>확인</button>
+            </div>
+          </div>
+        )}
+
+        {phase==='error' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{fontSize:40,marginBottom:16}}>⚠️</div>
+            <div style={{fontSize:16,fontWeight:700,color:C.danger,marginBottom:8}}>업로드 실패</div>
+            <div style={{fontSize:12,color:C.dim,marginBottom:20,lineHeight:1.6}}>{errorMsg}</div>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={onClose} style={{flex:1,height:44,borderRadius:10,background:'none',border:`1px solid ${C.border}`,color:C.text,cursor:'pointer'}}>닫기</button>
+              <button onClick={startUpload} style={{flex:1,height:44,borderRadius:10,background:C.blue,color:'#fff',border:'none',fontWeight:700,cursor:'pointer'}}>재시도</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Toast ────────────────────────────────────────────────────
 function Toast({ message, visible }) {
   return (
@@ -692,6 +889,8 @@ function Toast({ message, visible }) {
 // ═══════════════════════════════════════════════════════════════
 function CaptureApp() {
   const [accessToken,      setAccessToken]      = useState(null);
+  const [appMode,          setAppMode]          = useState('360');   // '360' | 'visual'
+  // ── 360° 상태 ────────────────────────────────────────────────
   const [selectedSides,    setSelectedSides]    = useState({ outboard:true, inboard:false });
   const [segments,         setSegments]         = useState({ outboard:6, inboard:6 });
   const [capturedData,     setCapturedData]     = useState({ outboard:emptyCapture(), inboard:emptyCapture() });
@@ -702,11 +901,16 @@ function CaptureApp() {
   const [flipped,          setFlipped]          = useState(false);
   const [view,             setView]             = useState('capture');
   const [showUpload,       setShowUpload]       = useState(false);
-  const [confirmRetake,    setConfirmRetake]    = useState(null);  // {side, productId}
-  const [confirmSwitch,    setConfirmSwitch]    = useState(null);  // {side, productId}
+  const [confirmRetake,    setConfirmRetake]    = useState(null);
+  const [confirmSwitch,    setConfirmSwitch]    = useState(null);
+  // ── Visual Inspection 상태 ───────────────────────────────────
+  const [visualData,       setVisualData]       = useState({ outboard:emptyVisual(), inboard:emptyVisual() });
+  const [visualItem,       setVisualItem]       = useState(null);   // { side, itemId }
+  const [showVisualUpload, setShowVisualUpload] = useState(false);
+  // ── 공통 상태 ────────────────────────────────────────────────
   const [defaultZoom,      setDefaultZoom]      = useState(1.0);
   const [toast,            setToast]            = useState(null);
-  const [driveResult,      setDriveResult]      = useState(null);  // {link, folderName}
+  const [driveResult,      setDriveResult]      = useState(null);
 
   // OAuth redirect 처리
   useEffect(() => {
@@ -787,10 +991,36 @@ function CaptureApp() {
   };
 
 
+  // ── Visual 셔터 콜백 ───────────────────────────────────────
+  const handleVisualCapture = useCallback((blob, url) => {
+    const { side, itemId } = visualItem;
+    setVisualData(prev => ({ ...prev, [side]:{ ...prev[side], [itemId]:{ blob, url } } }));
+    setVisualItem(null);
+    showToast(`${VISUAL_ITEMS.find(x=>x.id===itemId)?.name} 촬영 완료`);
+  }, [visualItem, showToast]);
+
   // ── 로그인 전 ──────────────────────────────────────────────
   if (!accessToken) return <LoginScreen onLogin={setAccessToken}/>;
 
-  // ── 카메라 화면 ────────────────────────────────────────────
+  // ── 카메라 (Visual 모드) ───────────────────────────────────
+  if (visualItem) {
+    const vit = VISUAL_ITEMS.find(x=>x.id===visualItem.itemId);
+    return (
+      <div style={{height:'100%',position:'relative',background:'#000'}}>
+        <CameraScreen
+          product={{ id:'ball', name:vit?.name||'' }}
+          segments={1} shotIndex={0} totalShots={1} paused={false}
+          capturedImages={[]}
+          onCapture={handleVisualCapture}
+          onStop={()=>setVisualItem(null)}
+          onResume={()=>{}}
+          defaultZoom={defaultZoom} onZoomChange={setDefaultZoom}
+        />
+      </div>
+    );
+  }
+
+  // ── 카메라 화면 (360 모드) ─────────────────────────────────
   if (activeId) return (
     <div style={{height:'100%',position:'relative',background:'#000'}}>
       <CameraScreen
@@ -866,22 +1096,100 @@ function CaptureApp() {
     <div style={{height:'100%',display:'flex',flexDirection:'column',background:C.bg,fontFamily:FONT_SANS,color:C.text,position:'relative'}}>
 
       {/* 헤더 */}
-      <div style={{padding:'13px 20px 10px',paddingTop:'max(13px, env(safe-area-inset-top))',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-        <div>
-          <div style={{fontSize:9,color:C.dim,letterSpacing:2,fontFamily:FONT_MONO}}>JOINT REPORT</div>
-          <div style={{fontSize:17,fontWeight:700,marginTop:2,letterSpacing:-0.3}}>Joint 360° Inspection</div>
+      <div style={{padding:'13px 14px 0',paddingTop:'max(13px, env(safe-area-inset-top))'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:10}}>
+          <div>
+            <div style={{fontSize:9,color:C.dim,letterSpacing:2,fontFamily:FONT_MONO}}>JOINT REPORT</div>
+            <div style={{fontSize:16,fontWeight:700,marginTop:1,letterSpacing:-0.3}}>
+              {appMode==='360'?'360° Inspection':'Visual Inspection'}
+            </div>
+          </div>
+          <div style={{display:'flex',gap:6}}>
+            <button onClick={()=>{ setAccessToken(null); resetAll(); setVisualData({outboard:emptyVisual(),inboard:emptyVisual()}); }} style={{width:34,height:34,borderRadius:17,background:C.surface,border:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M10 2h3a1 1 0 011 1v10a1 1 0 01-1 1h-3" stroke={C.dim} strokeWidth="1.4" strokeLinecap="round"/><path d="M7 11l3-3-3-3M10 8H3" stroke={C.text} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+            <button onClick={()=>{ if(appMode==='360') resetAll(); else setVisualData({outboard:emptyVisual(),inboard:emptyVisual()}); }} disabled={isShooting} style={{width:34,height:34,borderRadius:17,background:C.surface,border:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:isShooting?'not-allowed':'pointer',opacity:isShooting?0.4:1}}>
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8a5 5 0 109-3" stroke={C.text} strokeWidth="1.5" strokeLinecap="round"/><path d="M12 2v3h-3" stroke={C.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </button>
+          </div>
         </div>
-        <div style={{display:'flex',gap:8}}>
-          <button onClick={()=>{ setAccessToken(null); resetAll(); }} style={{width:36,height:36,borderRadius:18,background:C.surface,border:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}} title="로그아웃">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 2h3a1 1 0 011 1v10a1 1 0 01-1 1h-3" stroke={C.dim} strokeWidth="1.4" strokeLinecap="round"/><path d="M7 11l3-3-3-3M10 8H3" stroke={C.text} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </button>
-          <button onClick={resetAll} disabled={isShooting} style={{width:36,height:36,borderRadius:18,background:C.surface,border:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:isShooting?'not-allowed':'pointer',opacity:isShooting?0.4:1}}>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8a5 5 0 109-3" stroke={C.text} strokeWidth="1.5" strokeLinecap="round"/><path d="M12 2v3h-3" stroke={C.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          </button>
+        {/* 모드 탭 */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:4,marginBottom:4}}>
+          {[{id:'360',label:'360° Inspection'},{id:'visual',label:'Visual Inspection'}].map(m=>{
+            const active=appMode===m.id;
+            return (
+              <button key={m.id} onClick={()=>setAppMode(m.id)} style={{
+                padding:'7px 4px',borderRadius:10,fontFamily:FONT_SANS,fontSize:11,fontWeight:active?700:500,
+                background:active?C.surface:'transparent',
+                border:`1.5px solid ${active?(m.id==='visual'?C.blue:C.accent):C.border}`,
+                color:active?(m.id==='visual'?C.blue:C.accent):C.dimmer,
+                cursor:'pointer',transition:'all 0.2s',
+              }}>{m.label}</button>
+            );
+          })}
         </div>
       </div>
 
       <div style={{flex:1,overflowY:'auto',padding:'0 14px 14px'}}>
+
+      {/* ── Visual Inspection 화면 ── */}
+      {appMode==='visual' && (
+        <div>
+          {SIDES.map(side => {
+            const sideShots = VISUAL_ITEMS.filter(it=>visualData[side][it.id]).length;
+            const sideDone  = sideShots===VISUAL_ITEMS.length;
+            return (
+              <div key={side} style={{borderRadius:16,marginBottom:12,border:`2px solid ${sideDone?C.blue+'80':C.border}`,background:C.surface}}>
+                {/* 섹션 헤더 */}
+                <div style={{padding:'10px 14px',borderBottom:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'space-between',borderRadius:'14px 14px 0 0'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    <div style={{width:8,height:8,borderRadius:4,background:sideDone?C.blue:C.dimmer}}/>
+                    <span style={{fontSize:13,fontWeight:700,letterSpacing:0.8,color:sideDone?C.blue:C.text}}>{SIDE_LABEL[side].toUpperCase()}</span>
+                    {sideDone && <span style={{fontSize:9,color:C.blue,fontFamily:FONT_MONO,background:`${C.blue}18`,padding:'2px 6px',borderRadius:4}}>✓ DONE</span>}
+                  </div>
+                  <span style={{fontFamily:FONT_MONO,fontSize:11,color:sideDone?C.blue:C.dim}}>{sideShots}<span style={{color:C.dimmer}}>/{VISUAL_ITEMS.length}</span></span>
+                </div>
+                {/* 3×2 그리드 */}
+                <div style={{padding:10,display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
+                  {VISUAL_ITEMS.map(item => {
+                    const shot = visualData[side][item.id];
+                    const done = !!shot;
+                    return (
+                      <button key={item.id} onClick={()=>setVisualItem({side,itemId:item.id})} style={{
+                        border:`1.5px solid ${done?C.blue+'60':C.border}`,borderRadius:10,
+                        background:done?`${C.blue}08`:C.surfaceHi,
+                        padding:0,overflow:'hidden',cursor:'pointer',
+                        display:'flex',flexDirection:'column',
+                      }}>
+                        {/* 썸네일 (4:3 비율) */}
+                        <div style={{width:'100%',aspectRatio:'4/3',background:done?'transparent':C.bg,position:'relative',overflow:'hidden'}}>
+                          {done
+                            ? <img src={shot.url} alt="" style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+                            : <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="4" stroke={C.dimmer} strokeWidth="1.4"/><path d="M9 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V5a2 2 0 00-2-2h-4l-1.5-2h-3L9 3z" stroke={C.dimmer} strokeWidth="1.4" fill="none"/></svg>
+                              </div>
+                          }
+                          {done && <div style={{position:'absolute',top:3,right:3,width:16,height:16,borderRadius:8,background:C.blue,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                            <svg width="9" height="9" viewBox="0 0 10 10" fill="none"><path d="M2 5l2.5 2.5L8 2.5" stroke="#fff" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                          </div>}
+                        </div>
+                        {/* 항목명 */}
+                        <div style={{padding:'4px 6px 5px',textAlign:'left'}}>
+                          <div style={{fontSize:8.5,fontWeight:done?700:500,color:done?C.blue:C.dim,fontFamily:FONT_SANS,lineHeight:1.3,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{item.name}</div>
+                          <div style={{fontSize:7.5,color:done?C.blue:C.dimmer,fontFamily:FONT_MONO,marginTop:1}}>{done?'재촬영':'촬영하기'}</div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── 360° Inspection 화면 ── */}
+      {appMode==='360' && <>
 
         {/* STEP 1: Side 선택 */}
         <div style={{marginBottom:12}}>
@@ -1005,23 +1313,37 @@ function CaptureApp() {
             )}
           </div>
         </div>
+      </>}
       </div>
 
       {/* 하단 버튼 */}
       <div style={{padding:'10px 14px',paddingBottom:'max(14px, env(safe-area-inset-bottom))',borderTop:`1px solid ${C.border}`,background:C.bg}}>
-        <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          <button onClick={()=>setView('gallery')} style={{width:48,height:48,borderRadius:12,background:C.surface,border:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke={C.text} strokeWidth="1.6"/><circle cx="9" cy="11" r="1.5" fill={C.text}/><path d="M3 17l5-4 4 3 4-3 5 4" stroke={C.text} strokeWidth="1.6" fill="none" strokeLinejoin="round"/></svg>
-          </button>
-          <button disabled={!anyShotsTotal} onClick={()=>setShowUpload(true)} style={{flex:1,height:48,borderRadius:12,background:anyShotsTotal?(allSidesDone?C.accent:C.surfaceHi):C.surface,border:`1px solid ${anyShotsTotal?(allSidesDone?C.accent:C.borderHi):C.border}`,color:allSidesDone?C.bg:anyShotsTotal?C.text:C.dimmer,fontSize:13,fontWeight:600,fontFamily:FONT_SANS,cursor:anyShotsTotal?'pointer':'not-allowed',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M7 18a4.5 4.5 0 01-.5-8.97A6 6 0 0118 9.5a4.5 4.5 0 01-.5 8.5H7z" stroke="currentColor" strokeWidth="1.7" fill="none"/><path d="M12 11v6M9.5 13.5L12 11l2.5 2.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
-            Drive 업로드 + PPT
-          </button>
-        </div>
+        {appMode==='360' ? (
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            <button onClick={()=>setView('gallery')} style={{width:48,height:48,borderRadius:12,background:C.surface,border:`1px solid ${C.border}`,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',flexShrink:0}}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke={C.text} strokeWidth="1.6"/><circle cx="9" cy="11" r="1.5" fill={C.text}/><path d="M3 17l5-4 4 3 4-3 5 4" stroke={C.text} strokeWidth="1.6" fill="none" strokeLinejoin="round"/></svg>
+            </button>
+            <button disabled={!anyShotsTotal} onClick={()=>setShowUpload(true)} style={{flex:1,height:48,borderRadius:12,background:anyShotsTotal?(allSidesDone?C.accent:C.surfaceHi):C.surface,border:`1px solid ${anyShotsTotal?(allSidesDone?C.accent:C.borderHi):C.border}`,color:allSidesDone?C.bg:anyShotsTotal?C.text:C.dimmer,fontSize:13,fontWeight:600,fontFamily:FONT_SANS,cursor:anyShotsTotal?'pointer':'not-allowed',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M7 18a4.5 4.5 0 01-.5-8.97A6 6 0 0118 9.5a4.5 4.5 0 01-.5 8.5H7z" stroke="currentColor" strokeWidth="1.7" fill="none"/><path d="M12 11v6M9.5 13.5L12 11l2.5 2.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              Drive 업로드 + PPT
+            </button>
+          </div>
+        ) : (()=>{
+          const anyVisual = SIDES.some(s=>VISUAL_ITEMS.some(it=>visualData[s][it.id]));
+          const allVisual = SIDES.every(s=>VISUAL_ITEMS.every(it=>visualData[s][it.id]));
+          return (
+            <button disabled={!anyVisual} onClick={()=>setShowVisualUpload(true)} style={{width:'100%',height:50,borderRadius:13,background:anyVisual?(allVisual?C.blue:C.surfaceHi):C.surface,border:`1.5px solid ${anyVisual?(allVisual?C.blue:C.borderHi):C.border}`,color:allVisual?'#fff':anyVisual?C.text:C.dimmer,fontSize:13,fontWeight:700,fontFamily:FONT_SANS,cursor:anyVisual?'pointer':'not-allowed',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.7"/><circle cx="9" cy="11" r="1.5" fill="currentColor"/><path d="M3 17l5-4 4 3 4-3 5 4" stroke="currentColor" strokeWidth="1.6" fill="none"/></svg>
+              Drive 업로드 + Visual PPT
+            </button>
+          );
+        })()}
       </div>
 
-      {/* Drive 업로드 모달 */}
+      {/* Drive 업로드 모달 (360) */}
       {showUpload && <UploadModal capturedData={capturedData} selectedSides={selectedSides} segments={segments} accessToken={accessToken} onClose={()=>setShowUpload(false)} onDone={()=>{ setShowUpload(false); showToast('Google Drive 업로드 완료!'); }}/>}
+      {/* Visual 업로드 모달 */}
+      {showVisualUpload && <VisualUploadModal visualData={visualData} accessToken={accessToken} onClose={()=>setShowVisualUpload(false)} onDone={()=>{ setShowVisualUpload(false); showToast('Visual 업로드 완료!'); }}/>}
 
       {/* 섹션 전환 확인 모달 */}
       {confirmSwitch && (()=>{

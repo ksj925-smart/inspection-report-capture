@@ -1,4 +1,4 @@
-const CACHE = 'inspection-report-v2';
+const CACHE = 'inspection-report-v3';
 const ASSETS = ['/', '/index.html', '/app.jsx', '/generate-ppt.js', '/google-config.js', '/manifest.json'];
 
 self.addEventListener('install', e => {
