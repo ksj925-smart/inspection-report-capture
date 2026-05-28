@@ -409,24 +409,32 @@ async function addVisualSlide(pptx, visualData) {
     }
 
     // ── Row 2: #3 CLAMP-JOINT (9:16) + #4 BOOT (4:3) + #5 CLAMP-SHAFT (9:16) ──
-    const row2Y  = yCnt + rowH;
-    const cellW3 = rW / 3;             // 1.447"
-    const row2Items = [
-      { id: 'clamp_joint',  label: '#3', ratio: [9, 16] },
-      { id: 'boot',         label: '#4', ratio: [4, 3]  },
-      { id: 'clamp_shaft',  label: '#5', ratio: [9, 16] },
+    // row2CellH: float 연산 없이 리터럴로 고정 → 세 칸 완전히 동일한 높이 보장
+    const row2Y      = yCnt + rowH;
+    const row2CellH  = rowH;                // 3.14" 고정 (float drift 방지용 별도 변수)
+    const row2PhotoH = row2CellH - lblH;    // 레이블 제외 사진 영역 = 2.88"
+    const cellW3     = rW / 3;             // 1.447"
+
+    // #3/#5: 9:16 세로 (세로 중앙 정렬)
+    // #4: 4:3 가로이지만 칸 높이 동일, 사진은 상단 정렬 (짧은 사진이 중앙에 뜨는 현상 제거)
+    const row2Defs = [
+      { id: 'clamp_joint',  label: '#3', ratio: [9, 16], topAlign: false },
+      { id: 'boot',         label: '#4', ratio: [4, 3],  topAlign: true  },
+      { id: 'clamp_shaft',  label: '#5', ratio: [9, 16], topAlign: false },
     ];
 
-    for (let i = 0; i < row2Items.length; i++) {
-      const item  = row2Items[i];
+    for (let i = 0; i < row2Defs.length; i++) {
+      const item  = row2Defs[i];
       const cellX = rX + i * cellW3;
       const cellY = row2Y;
 
+      // 셀 테두리 — 세 칸 모두 동일한 row2CellH 사용
       slide.addShape('rect', {
-        x: cellX, y: cellY, w: cellW3, h: rowH,
+        x: cellX, y: cellY, w: cellW3, h: row2CellH,
         fill: { type: 'none' },
         line: { color: T.cellBorder, width: 0.5 },
       });
+      // 레이블 배경
       slide.addShape('rect', {
         x: cellX, y: cellY, w: cellW3, h: lblH,
         fill: { color: T.hdrCell }, line: { type: 'none' },
@@ -440,11 +448,13 @@ async function addVisualSlide(pptx, visualData) {
       const idata = (visualData[side] || {})[item.id];
       if (idata && idata.blob) {
         const url = await blobToDataUrl(idata.blob);
-        const fit = calcImageFit(cellW3 - pad * 2, photoH - pad * 2, item.ratio[0], item.ratio[1]);
+        const fit = calcImageFit(cellW3 - pad * 2, row2PhotoH - pad * 2, item.ratio[0], item.ratio[1]);
+        // topAlign=true(#4 BOOT): 상단 정렬(offY=0) / false(#3,#5): 세로 중앙 정렬
+        const photoOffY = item.topAlign ? 0 : fit.offY;
         slide.addImage({
           data: url,
           x: cellX + pad + fit.offX,
-          y: cellY + lblH + pad + fit.offY,
+          y: cellY + lblH + pad + photoOffY,
           w: fit.w,
           h: fit.h,
         });
