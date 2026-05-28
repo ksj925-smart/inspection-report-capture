@@ -348,12 +348,12 @@ async function addVisualSlide(pptx, visualData) {
       fontFace: 'Arial', align: 'center', valign: 'middle',
     });
 
-    // JOINT 사진 (3:4 세로, contain-fit)
+    // JOINT 사진 (9:16 세로, contain-fit)
     const jPhotoAreaH = cntH - lblH;   // 6.02"
     const jdata = (visualData[side] || {})['joint'];
     if (jdata && jdata.blob) {
       const url = await blobToDataUrl(jdata.blob);
-      const fit = calcImageFit(jW - pad * 2, jPhotoAreaH - pad * 2, 3, 4);
+      const fit = calcImageFit(jW - pad * 2, jPhotoAreaH - pad * 2, 9, 16);
       slide.addImage({
         data: url,
         x: jX + pad + fit.offX,

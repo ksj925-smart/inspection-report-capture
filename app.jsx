@@ -34,7 +34,7 @@ const SIDE_LABEL = { outboard:'Outboard', inboard:'Inboard' };
 
 // ─── Visual Inspection 항목 정의 ──────────────────────────────
 const VISUAL_ITEMS = [
-  { id:'joint',        name:'JOINT',             filename:'JOINT.jpg',           ratioKey:'outer_race'   },  // 3:4 세로
+  { id:'joint',        name:'JOINT',             filename:'JOINT.jpg',           ratioKey:'portrait_916' },  // 9:16 세로
   { id:'interface',    name:'1. INTERFACE',      filename:'1_INTERFACE.jpg',     ratioKey:'ball'         },  // 4:3 가로
   { id:'bearing_face', name:'2. BEARING FACE',   filename:'2_BEARING_FACE.jpg',  ratioKey:'ball'         },  // 4:3 가로
   { id:'clamp_joint',  name:'3. CLAMP — JOINT',  filename:'3_CLAMP_JOINT.jpg',   ratioKey:'portrait_916' },  // 9:16 세로
