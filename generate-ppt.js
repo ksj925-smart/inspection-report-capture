@@ -1,29 +1,30 @@
 // ═══════════════════════════════════════════════════════════════
-// generate-ppt.js — Joint Report PPT 자동 생성
-// pptxgenjs (CDN) 사용 / window.generateJointReportPPT() 노출
-// 반환값: { blob: Blob, fileName: string }  (Drive에 직접 업로드)
-// 디자인: ppt양식.pptx 템플릿 기반
+// generate-ppt.js — Joint Report PPT 자동 생성 (addTable 기반)
+// pptxgenjs v3.12 CDN 사용 / window.generateJointReportPPT() 노출
 // ═══════════════════════════════════════════════════════════════
 
-// ── 템플릿 디자인 상수 (ppt양식.pptx 추출) ─────────────────────
+// ── 디자인 상수 ─────────────────────────────────────────────────
 const T = {
-  bgSlide:    'FFFFFF',  // 콘텐츠 슬라이드 배경 (흰색)
-  bgCover:    '0D4689',  // 표지 배경 (다크 네이비)
-  hdrCell:    '0D4689',  // 번호 셀 배경 (네이비)
-  hdrText:    'FFFFFF',  // 번호 셀 텍스트 (흰색)
-  cellBorder: 'BFBFBF',  // 셀 테두리 (연회색)
-  titleText:  '000000',  // 슬라이드 제목 (검정)
-  accentLine: '00B0F0',  // 강조 선 (시안)
-  coverTitle: 'FFFFFF',  // 표지 제목
-  coverSub:   'BDD7EE',  // 표지 부제목
-  coverDate:  'D9E2F0',  // 표지 날짜
-  dimText:    '5A6A7A',  // 보조 텍스트
+  bgSlide:    'FFFFFF',
+  bgCover:    '0D4689',
+  hdrCell:    '0D4689',  // 번호 셀 / 제품 헤더 (다크 네이비)
+  secHdr:     '1F5C8B',  // Visual 섹션 헤더 (미드 네이비)
+  hdrText:    'FFFFFF',
+  cellBorder: 'BFBFBF',
+  titleText:  '000000',
+  accentLine: '00B0F0',
+  coverTitle: 'FFFFFF',
+  coverSub:   'BDD7EE',
+  coverDate:  'D9E2F0',
 };
 
+const BORDER = { pt: 0.5, color: 'BFBFBF' };
+
+// ── 유틸리티 ────────────────────────────────────────────────────
 async function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
+    reader.onload  = () => resolve(reader.result);
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
@@ -36,22 +37,7 @@ function formatDateStr(date) {
   return `${y}-${m}-${d}`;
 }
 
-const PRODUCTS_DEF = [
-  { id: 'outer_race', name: 'OUTER RACE' },
-  { id: 'inner_race', name: 'INNER RACE' },
-  { id: 'cage',       name: 'CAGE' },
-  { id: 'ball',       name: 'BALL' },
-];
-
-// 촬영 비율과 동일하게 PPT 이미지 비율 유지 [가로, 세로]
-const CROP_RATIO_PPT = {
-  outer_race: [3, 4],
-  inner_race: [3, 4],
-  cage:       [8, 3],
-  ball:       [4, 3],
-};
-
-// ── 이미지 비율 유지 피팅 헬퍼 ──────────────────────────────────
+// 이미지 contain-fit 헬퍼
 function calcImageFit(maxW, maxH, rw, rh) {
   const scale = Math.min(maxW / rw, maxH / rh);
   const w = rw * scale;
@@ -59,413 +45,399 @@ function calcImageFit(maxW, maxH, rw, rh) {
   return { w, h, offX: (maxW - w) / 2, offY: (maxH - h) / 2 };
 }
 
-// ── 콘텐츠 슬라이드 공통 헤더 렌더링 ───────────────────────────
+// ── 제품 정의 ────────────────────────────────────────────────────
+const PRODUCTS_DEF = [
+  { id: 'outer_race', name: 'OUTER RACE' },
+  { id: 'inner_race', name: 'INNER RACE' },
+  { id: 'cage',       name: 'CAGE'       },
+  { id: 'ball',       name: 'BALL'       },
+];
+
+const CROP_RATIO_PPT = {
+  outer_race: [3, 4],
+  inner_race: [3, 4],
+  cage:       [8, 3],
+  ball:       [4, 3],
+};
+
+// ── 공통 슬라이드 헤더 ───────────────────────────────────────────
 function addSlideHeader(slide, title) {
-  // 제목: 우측 정렬, Arial 22pt bold 검정
   slide.addText(title, {
     x: 3.8, y: 0.10, w: 9.33, h: 0.52,
     fontSize: 20, bold: true, color: T.titleText,
     align: 'right', fontFace: 'Arial', valign: 'middle',
   });
-  // 네이비 좌측 액센트 바 (좌상단 세로 바)
   slide.addShape('rect', {
     x: 0, y: 0, w: 0.18, h: 0.72,
     fill: { color: T.hdrCell }, line: { type: 'none' },
   });
-  // 시안 하단 구분선
   slide.addShape('rect', {
     x: 0.18, y: 0.68, w: 13.15, h: 0.035,
     fill: { color: T.accentLine }, line: { type: 'none' },
   });
 }
 
-// ── 제품 슬라이드 (N cols × auto rows) ─────────────────────────
-// labels: 셀 번호 문자열 배열 (null이면 #1~#N 자동 생성)
+// ── 헤더 셀 생성 헬퍼 ───────────────────────────────────────────
+function makeHdrCell(text, colspan, bgColor) {
+  const opts = {
+    fill:    { color: bgColor || T.hdrCell },
+    color:   T.hdrText,
+    bold:    true,
+    fontSize: 11,
+    fontFace: 'Arial',
+    align:   'center',
+    valign:  'middle',
+    border:  BORDER,
+  };
+  if (colspan && colspan > 1) opts.colspan = colspan;
+  return { text, options: opts };
+}
+
+// 빈 사진 셀
+function makePhotoCell(colspan) {
+  const opts = { fill: { color: 'FFFFFF' }, border: BORDER };
+  if (colspan && colspan > 1) opts.colspan = colspan;
+  return { text: '', options: opts };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 제품 슬라이드 — OUTER RACE / INNER RACE / CAGE  (addTable)
+// 구조: 헤더 행 1줄 + (레이블 행 + 사진 행) × nPhotoRows
+// ═══════════════════════════════════════════════════════════════
 async function addProductSlide(pptx, title, shots, cols, ratioWH, labels = null) {
-  const [rw, rh] = ratioWH;
-  const rows = Math.ceil(shots.length / cols);
+  const [rw, rh]   = ratioWH;
+  const nPhotoRows = Math.ceil(shots.length / cols);
 
   const slide = pptx.addSlide();
   slide.background = { color: T.bgSlide };
-
   addSlideHeader(slide, title);
 
-  const marginX = 0.22;
+  const mx      = 0.22;
   const startY  = 0.82;
-  const gapX    = 0.06;
-  const gapY    = 0.06;
-  const availW  = 13.33 - marginX * 2;
-  const availH  = 7.5 - startY - 0.1;
-  const cellW   = (availW - gapX * (cols - 1)) / cols;
-  const cellH   = (availH - gapY * (rows - 1)) / rows;
-  const lblH    = 0.30;  // 번호 헤더 셀 높이
-  const imgPad  = 0.06;
+  const availW  = 13.33 - mx * 2;          // 12.89"
+  const availH  = 7.5  - startY - 0.10;   // 6.58"
+  const hdrH    = 0.30;
+  const lblH    = 0.26;
+  const pad     = 0.05;
 
-  for (let i = 0; i < shots.length; i++) {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    const x   = marginX + col * (cellW + gapX);
-    const y   = startY  + row * (cellH + gapY);
+  const photoH = +((availH - hdrH - nPhotoRows * lblH) / nPhotoRows).toFixed(4);
+  const cellW  = +(availW / cols).toFixed(4);
 
-    // 셀 전체 테두리 (연회색)
-    slide.addShape('rect', {
-      x, y, w: cellW, h: cellH,
-      fill: { type: 'none' },
-      line: { color: T.cellBorder, width: 0.5 },
-    });
+  const colWArr = Array(cols).fill(cellW);
+  const rowHArr = [hdrH];
+  for (let r = 0; r < nPhotoRows; r++) {
+    rowHArr.push(lblH);
+    rowHArr.push(photoH);
+  }
 
-    // 번호 헤더 셀 (네이비 배경)
-    slide.addShape('rect', {
-      x, y, w: cellW, h: lblH,
-      fill: { color: T.hdrCell },
-      line: { type: 'none' },
-    });
+  // ── 표 행 빌드 ──────────────────────────────────────────────
+  const tableRows = [];
 
-    // 번호 텍스트 (흰색, Arial bold)
-    const labelText = labels ? labels[i] : `#${i + 1}`;
-    slide.addText(labelText, {
-      x, y, w: cellW, h: lblH,
-      fontSize: 11, bold: true, color: T.hdrText,
-      fontFace: 'Arial', align: 'center', valign: 'middle',
-    });
+  // 헤더 행 (colspan=전체 cols)
+  tableRows.push([ makeHdrCell(title, cols) ]);
 
-    // 이미지
-    if (shots[i] && shots[i].blob) {
-      const dataUrl = await blobToDataUrl(shots[i].blob);
-      const imgAreaW = cellW - imgPad * 2;
-      const imgAreaH = cellH - lblH - imgPad * 2;
-      const fit = calcImageFit(imgAreaW, imgAreaH, rw, rh);
-      slide.addImage({
-        data: dataUrl,
-        x: x + imgPad + fit.offX,
-        y: y + lblH + imgPad + fit.offY,
-        w: fit.w,
-        h: fit.h,
-      });
+  for (let r = 0; r < nPhotoRows; r++) {
+    const si = r * cols;
+
+    // 레이블 행
+    const lblRow = [];
+    for (let c = 0; c < cols; c++) {
+      const i   = si + c;
+      const lbl = labels ? (labels[i] || '') : (i < shots.length ? `#${i + 1}` : '');
+      lblRow.push(makeHdrCell(lbl, 1));
     }
+    tableRows.push(lblRow);
+
+    // 사진 행 (빈 셀 — 이미지는 오버레이)
+    tableRows.push(Array(cols).fill(null).map(() => makePhotoCell(1)));
+  }
+
+  slide.addTable(tableRows, {
+    x:    mx,
+    y:    startY,
+    colW: colWArr,
+    rowH: rowHArr,
+  });
+
+  // ── 이미지 오버레이 ─────────────────────────────────────────
+  for (let i = 0; i < shots.length; i++) {
+    if (!shots[i] || !shots[i].blob) continue;
+    const col  = i % cols;
+    const row  = Math.floor(i / cols);
+    const cellX = mx + col * cellW;
+    const cellY = startY + hdrH + row * (lblH + photoH) + lblH;
+    const dataUrl = await blobToDataUrl(shots[i].blob);
+    const fit = calcImageFit(cellW - pad * 2, photoH - pad * 2, rw, rh);
+    slide.addImage({
+      data: dataUrl,
+      x: cellX + pad + fit.offX,
+      y: cellY + pad + fit.offY,
+      w: fit.w,
+      h: fit.h,
+    });
   }
 }
 
-// ── BALL 슬라이드 (중앙 4:3 가로) ─────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// BALL 슬라이드 — 중앙 4:3 단일 이미지  (addTable)
+// ═══════════════════════════════════════════════════════════════
 async function addBallSlide(pptx, title, shot) {
   const slide = pptx.addSlide();
   slide.background = { color: T.bgSlide };
-
   addSlideHeader(slide, title);
 
-  // 4:3 이미지를 슬라이드 바디 중앙에 배치
   const startY = 0.82;
-  const imgH   = 5.3;
-  const imgW   = imgH * (4 / 3);  // ≈ 7.07"
-  const cx     = (13.33 - imgW) / 2;
-  const bodyH  = 7.5 - startY - 0.1;
+  const availH = 7.5 - startY - 0.10;
   const lblH   = 0.30;
-  const totalH = lblH + imgH;
-  const cy     = startY + (bodyH - totalH) / 2;
+  const photoH = 5.3;
+  const imgW   = +(photoH * 4 / 3).toFixed(4);           // ≈ 7.07"
+  const cx     = +((13.33 - imgW) / 2).toFixed(4);
+  const cy     = +(startY + (availH - lblH - photoH) / 2).toFixed(4);
 
-  // 셀 전체 테두리
-  slide.addShape('rect', {
-    x: cx, y: cy, w: imgW, h: totalH,
-    fill: { type: 'none' },
-    line: { color: T.cellBorder, width: 0.5 },
-  });
-
-  // 번호 헤더 셀 (네이비)
-  slide.addShape('rect', {
-    x: cx, y: cy, w: imgW, h: lblH,
-    fill: { color: T.hdrCell },
-    line: { type: 'none' },
-  });
-
-  // 번호 텍스트
-  slide.addText('#1', {
-    x: cx, y: cy, w: imgW, h: lblH,
-    fontSize: 12, bold: true, color: T.hdrText,
-    fontFace: 'Arial', align: 'center', valign: 'middle',
-  });
+  slide.addTable(
+    [
+      [ makeHdrCell('#1', 1) ],
+      [ makePhotoCell(1)     ],
+    ],
+    { x: cx, y: cy, colW: [imgW], rowH: [lblH, photoH] }
+  );
 
   if (shot && shot.blob) {
     const dataUrl = await blobToDataUrl(shot.blob);
-    slide.addImage({ data: dataUrl, x: cx, y: cy + lblH, w: imgW, h: imgH });
+    slide.addImage({ data: dataUrl, x: cx, y: cy + lblH, w: imgW, h: photoH });
   }
 }
 
-// ── 표지 슬라이드 (ppt양식.pptx 템플릿 기반) ───────────────────
+// ═══════════════════════════════════════════════════════════════
+// 표지 슬라이드 (360°)
+// ═══════════════════════════════════════════════════════════════
 function addCoverSlide(pptx, selectedSides, date) {
   const slide = pptx.addSlide();
-  slide.background = { color: T.bgCover };  // 다크 네이비
-
-  // 상단 시안 라인
-  slide.addShape('rect', {
-    x: 0, y: 0, w: '100%', h: 0.06,
-    fill: { color: T.accentLine }, line: { type: 'none' },
-  });
-
-  // 좌측 장식 세로 바
-  slide.addShape('rect', {
-    x: 0, y: 0.06, w: 0.35, h: 7.44,
-    fill: { color: '0A3A73' }, line: { type: 'none' },
-  });
-
-  // JOINT REPORT 레이블 (소문자 스타일)
-  slide.addText('JOINT REPORT', {
-    x: 0.65, y: 1.5, w: 11, h: 0.42,
-    fontSize: 11, color: T.coverSub, fontFace: 'Calibri',
-    charSpacing: 5,
-  });
-
-  // 메인 제목
-  slide.addText('Joint 360° Inspection Report', {
-    x: 0.65, y: 1.95, w: 11, h: 1.1,
-    fontSize: 34, bold: true, color: T.coverTitle,
-    fontFace: 'Calibri',
-  });
-
-  // 시안 구분선
-  slide.addShape('rect', {
-    x: 0.65, y: 3.2, w: 5.5, h: 0.04,
-    fill: { color: T.accentLine }, line: { type: 'none' },
-  });
-
-  // 측면 레이블 (Outboard · Inboard)
-  const sides = [];
-  if (selectedSides.outboard) sides.push('Outboard');
-  if (selectedSides.inboard)  sides.push('Inboard');
-  slide.addText(sides.join('  ·  '), {
-    x: 0.65, y: 3.35, w: 11, h: 0.42,
-    fontSize: 15, color: T.coverSub, fontFace: 'Calibri',
-  });
-
-  // 날짜
-  slide.addText(formatDateStr(date), {
-    x: 0.65, y: 3.88, w: 8, h: 0.38,
-    fontSize: 13, italic: true, color: T.coverDate, fontFace: 'Calibri',
-  });
-
-  // 하단 바
-  slide.addShape('rect', {
-    x: 0, y: 7.42, w: '100%', h: 0.08,
-    fill: { color: '0A3A73' }, line: { type: 'none' },
-  });
-}
-
-// ── Visual 표지 슬라이드 ────────────────────────────────────────
-function addVisualCoverSlide(pptx, date) {
-  const slide = pptx.addSlide();
   slide.background = { color: T.bgCover };
-
   slide.addShape('rect', { x:0, y:0, w:'100%', h:0.06, fill:{color:T.accentLine}, line:{type:'none'} });
   slide.addShape('rect', { x:0, y:0.06, w:0.35, h:7.44, fill:{color:'0A3A73'}, line:{type:'none'} });
-
-  slide.addText('JOINT REPORT', { x:0.65, y:1.5, w:11, h:0.42, fontSize:11, color:T.coverSub, fontFace:'Calibri', charSpacing:5 });
-  slide.addText('Joint Visual Inspection Report', { x:0.65, y:1.95, w:11, h:1.0, fontSize:32, bold:true, color:T.coverTitle, fontFace:'Calibri' });
-
-  slide.addShape('rect', { x:0.65, y:3.1, w:5.5, h:0.04, fill:{color:T.accentLine}, line:{type:'none'} });
-  slide.addText('Outboard  ·  Inboard', { x:0.65, y:3.25, w:11, h:0.42, fontSize:14, color:T.coverSub, fontFace:'Calibri' });
-  slide.addText(formatDateStr(date), { x:0.65, y:3.78, w:8, h:0.38, fontSize:13, italic:true, color:T.coverDate, fontFace:'Calibri' });
-
+  slide.addText('JOINT REPORT',                     { x:0.65, y:1.5,  w:11, h:0.42, fontSize:11, color:T.coverSub,   fontFace:'Calibri', charSpacing:5 });
+  slide.addText('Joint 360° Inspection Report',     { x:0.65, y:1.95, w:11, h:1.1,  fontSize:34, bold:true, color:T.coverTitle, fontFace:'Calibri' });
+  slide.addShape('rect', { x:0.65, y:3.2, w:5.5, h:0.04, fill:{color:T.accentLine}, line:{type:'none'} });
+  const sideList = [];
+  if (selectedSides.outboard) sideList.push('Outboard');
+  if (selectedSides.inboard)  sideList.push('Inboard');
+  slide.addText(sideList.join('  ·  '),             { x:0.65, y:3.35, w:11, h:0.42, fontSize:15, color:T.coverSub,   fontFace:'Calibri' });
+  slide.addText(formatDateStr(date),                { x:0.65, y:3.88, w:8,  h:0.38, fontSize:13, italic:true, color:T.coverDate, fontFace:'Calibri' });
   slide.addShape('rect', { x:0, y:7.42, w:'100%', h:0.08, fill:{color:'0A3A73'}, line:{type:'none'} });
 }
 
-// ── Visual Inspection 슬라이드 ─────────────────────────────────
-// 레이아웃 (13.33" × 7.5" WIDE):
-//  좌절반: OUTBOARD(OBJ)  /  우절반: INBOARD(IBJ)
-//  각 섹션:
-//    ┌──────────────────────────────────────────────────┐
-//    │  OBJ / IBJ  — 섹션 헤더 (네이비, 전체폭)          │ h=0.30"
-//    ├──────────┬───────────────────────────────────────┤
-//    │ OBJ/IBJ  │ Row1: [#1 4:3] | [#2 4:3]            │ h=rowH
-//    │  레이블  ├───────────────────────────────────────┤
-//    │  3:4     │ Row2: [#3 9:16]|[#4 4:3]|[#5 9:16]   │ h=rowH
-//    │  JOINT   │                                       │
-//    └──────────┴───────────────────────────────────────┘
+// ═══════════════════════════════════════════════════════════════
+// Visual 표지 슬라이드
+// ═══════════════════════════════════════════════════════════════
+function addVisualCoverSlide(pptx, date) {
+  const slide = pptx.addSlide();
+  slide.background = { color: T.bgCover };
+  slide.addShape('rect', { x:0, y:0, w:'100%', h:0.06, fill:{color:T.accentLine}, line:{type:'none'} });
+  slide.addShape('rect', { x:0, y:0.06, w:0.35, h:7.44, fill:{color:'0A3A73'}, line:{type:'none'} });
+  slide.addText('JOINT REPORT',                     { x:0.65, y:1.5,  w:11, h:0.42, fontSize:11, color:T.coverSub,   fontFace:'Calibri', charSpacing:5 });
+  slide.addText('Joint Visual Inspection Report',   { x:0.65, y:1.95, w:11, h:1.0,  fontSize:32, bold:true, color:T.coverTitle, fontFace:'Calibri' });
+  slide.addShape('rect', { x:0.65, y:3.1,  w:5.5, h:0.04, fill:{color:T.accentLine}, line:{type:'none'} });
+  slide.addText('Outboard  ·  Inboard',             { x:0.65, y:3.25, w:11, h:0.42, fontSize:14, color:T.coverSub,   fontFace:'Calibri' });
+  slide.addText(formatDateStr(date),                { x:0.65, y:3.78, w:8,  h:0.38, fontSize:13, italic:true, color:T.coverDate, fontFace:'Calibri' });
+  slide.addShape('rect', { x:0, y:7.42, w:'100%', h:0.08, fill:{color:'0A3A73'}, line:{type:'none'} });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Visual Inspection 슬라이드  (addTable + rowspan/colspan)
+//
+// 슬라이드 절반씩 OBJ(좌) / IBJ(우), 각 섹션 표 구조:
+//   7 cols: [jW, u, u, u, u, u, u]   (jW=25% of sW, u=rW/6)
+//
+//   R0  h=secHdrH : [colspan=7  "OBJ — OUTBOARD"   ] 네이비 헤더
+//   R1  h=lblH    : [jLabel | #1(colspan=3) | #2(colspan=3)] 서브헤더
+//   R2  h=photoH1 : [JOINT(rowspan=3) | #1사진(colspan=3) | #2사진(colspan=3)]
+//   R3  h=lblH    : [C0 rowspan계속   | #3(cs=2) | #4(cs=2) | #5(cs=2)]
+//   R4  h=photoH2 : [C0 rowspan계속   | #3사진(cs=2) | #4사진(cs=2) | #5사진(cs=2)]
+// ═══════════════════════════════════════════════════════════════
 async function addVisualSlide(pptx, visualData) {
   const slide = pptx.addSlide();
   slide.background = { color: T.bgSlide };
-
   addSlideHeader(slide, 'Joint Visual Inspection');
 
-  const sides   = ['outboard', 'inboard'];
-  const margin  = 0.12;
-  const secGap  = 0.21;                                   // 섹션 간 간격
-  const sW      = (13.33 - margin * 2 - secGap) / 2;     // 각 섹션 폭 = 6.44"
-  const startY  = 0.82;
-  const availH  = 7.5 - startY - 0.10;                   // 콘텐츠 높이 = 6.58"
-  const secHdrH = 0.30;   // OBJ/IBJ 섹션 헤더 높이
-  const lblH    = 0.26;   // 각 사진 셀 레이블 높이
-  const cntH    = availH - secHdrH;                       // 레이아웃 내용 높이 = 6.28"
-  const jW      = +(sW * 0.25).toFixed(3);  // JOINT 열 폭 = 섹션 폭의 25% ≈ 1.61"
-  const rW      = +(sW - jW).toFixed(3);                  // 우측 사진 영역 폭 ≈ 4.83"
-  const pad     = 0.05;   // 사진 내부 여백
+  const margin   = 0.12;
+  const secGap   = 0.21;
+  const sW       = +((13.33 - margin * 2 - secGap) / 2).toFixed(4);  // ≈ 6.44"
+  const startY   = 0.82;
+  const availH   = 7.5 - startY - 0.10;                               // 6.58"
+  const secHdrH  = 0.30;
+  const lblH     = 0.26;
+  const cntH     = +(availH - secHdrH).toFixed(4);                    // 6.28"
+  const jW       = +(sW * 0.25).toFixed(4);    // JOINT 열 폭 ≈ 1.61"
+  const rW       = +(sW - jW).toFixed(4);      // 우측 사진 영역 폭 ≈ 4.83"
+  const u        = +(rW / 6).toFixed(4);       // LCM(2,3)=6 단위 폭 ≈ 0.805"
+  const pad      = 0.05;
 
-  // ── 셀 폭 (루프 밖 공통 계산) ────────────────────────────────
-  const cellW12 = +(rW / 2).toFixed(3);   // Row1 셀 폭 ≈ 2.42"
-  const cellW3  = +(rW / 3).toFixed(3);   // Row2 셀 폭 ≈ 1.61"
+  // Row 높이: 45% / 45% / 나머지(10%)
+  const row1CellH  = +(cntH * 0.45).toFixed(4);   // ≈ 2.826"
+  const row2CellH  = row1CellH;
+  const row1PhotoH = +(row1CellH - lblH).toFixed(4);
+  const row2PhotoH = +(row2CellH - lblH).toFixed(4);
 
-  // ── 세로 배분: Row1 45% / Row2 45% / 여백 10% ────────────────
-  const row1CellH  = +(cntH * 0.45).toFixed(3);  // ≈ 2.83"
-  const row2CellH  = row1CellH;                   // 동일 고정값 (완전히 같은 높이)
-  const row1PhotoH = row1CellH - lblH;
-  const row2PhotoH = row2CellH - lblH;
+  const colWArr = [jW, u, u, u, u, u, u];
+  const rowHArr = [secHdrH, lblH, row1PhotoH, lblH, row2PhotoH];
 
-  // 섹션 중간 구분선
+  // 섹션 구분선
   const divX = margin + sW + secGap / 2 - 0.008;
   slide.addShape('rect', {
     x: divX, y: startY, w: 0.016, h: availH,
     fill: { color: T.cellBorder }, line: { type: 'none' },
   });
 
+  const sides = ['outboard', 'inboard'];
+
   for (let idx = 0; idx < sides.length; idx++) {
-    const side    = sides[idx];
-    const sX      = margin + idx * (sW + secGap);
-    const sLabel  = side === 'outboard' ? 'OBJ  —  OUTBOARD' : 'IBJ  —  INBOARD';
-    const jLabel  = side === 'outboard' ? 'OBJ' : 'IBJ';
+    const side   = sides[idx];
+    const sX     = margin + idx * (sW + secGap);
+    const sLabel = side === 'outboard' ? 'OBJ  —  OUTBOARD' : 'IBJ  —  INBOARD';
+    const jLabel = side === 'outboard' ? 'OBJ' : 'IBJ';
+    const sd     = visualData[side] || {};
 
-    const ySH  = startY;                 // 섹션 헤더 y
-    const yCnt = startY + secHdrH;       // 콘텐츠 시작 y = 1.12"
+    // ── addTable 행 구성 ─────────────────────────────────────
+    const tableRows = [
+      // R0 — 섹션 헤더
+      [{ text: sLabel, options: {
+        colspan: 7, fill: { color: T.secHdr }, color: T.hdrText,
+        bold: true, fontSize: 12, fontFace: 'Arial',
+        align: 'center', valign: 'middle', border: BORDER,
+      }}],
 
-    // ── 섹션 헤더 (전체 폭, 네이비) ──────────────────────────
-    slide.addShape('rect', {
-      x: sX, y: ySH, w: sW, h: secHdrH,
-      fill: { color: '1F5C8B' }, line: { type: 'none' },
-    });
-    slide.addText(sLabel, {
-      x: sX, y: ySH, w: sW, h: secHdrH,
-      fontSize: 11, bold: true, color: 'FFFFFF',
-      fontFace: 'Arial', align: 'center', valign: 'middle',
-    });
+      // R1 — 서브 헤더 (7 cols = 1+3+3)
+      [
+        { text: jLabel, options: { fill:{color:T.hdrCell}, color:T.hdrText, bold:true, fontSize:11, fontFace:'Arial', align:'center', valign:'middle', border:BORDER } },
+        { text: '#1',   options: { colspan:3, fill:{color:T.hdrCell}, color:T.hdrText, bold:true, fontSize:11, fontFace:'Arial', align:'center', valign:'middle', border:BORDER } },
+        { text: '#2',   options: { colspan:3, fill:{color:T.hdrCell}, color:T.hdrText, bold:true, fontSize:11, fontFace:'Arial', align:'center', valign:'middle', border:BORDER } },
+      ],
 
-    // ── JOINT 열 (좌측) ──────────────────────────────────────
-    const jX        = sX;
-    const jointCellH = row1CellH + row2CellH;   // Row1+Row2 높이 합 (= 90% of cntH)
+      // R2 — 사진 행1 (JOINT rowspan=3, colspan 생략=1 / 나머지 cs=3씩)
+      [
+        { text: '', options: { rowspan:3, fill:{color:'FFFFFF'}, border:BORDER } },
+        { text: '', options: { colspan:3, fill:{color:'FFFFFF'}, border:BORDER } },
+        { text: '', options: { colspan:3, fill:{color:'FFFFFF'}, border:BORDER } },
+      ],
 
-    // JOINT 전체 셀 테두리 (두 행 전체 높이)
-    slide.addShape('rect', {
-      x: jX, y: yCnt, w: jW, h: jointCellH,
-      fill: { type: 'none' },
-      line: { color: T.cellBorder, width: 0.5 },
-    });
+      // R3 — 서브 헤더 행2 (C0 rowspan 계속 → 셀 3개만: 2+2+2)
+      [
+        { text: '#3', options: { colspan:2, fill:{color:T.hdrCell}, color:T.hdrText, bold:true, fontSize:11, fontFace:'Arial', align:'center', valign:'middle', border:BORDER } },
+        { text: '#4', options: { colspan:2, fill:{color:T.hdrCell}, color:T.hdrText, bold:true, fontSize:11, fontFace:'Arial', align:'center', valign:'middle', border:BORDER } },
+        { text: '#5', options: { colspan:2, fill:{color:T.hdrCell}, color:T.hdrText, bold:true, fontSize:11, fontFace:'Arial', align:'center', valign:'middle', border:BORDER } },
+      ],
 
-    // JOINT 레이블 (OBJ/IBJ, 네이비)
-    slide.addShape('rect', {
-      x: jX, y: yCnt, w: jW, h: lblH,
-      fill: { color: T.hdrCell }, line: { type: 'none' },
-    });
-    slide.addText(jLabel, {
-      x: jX, y: yCnt, w: jW, h: lblH,
-      fontSize: 10, bold: true, color: T.hdrText,
-      fontFace: 'Arial', align: 'center', valign: 'middle',
-    });
-
-    // JOINT 사진 (9:16 세로, contain-fit)
-    const jPhotoAreaH = jointCellH - lblH;
-    const jdata = (visualData[side] || {})['joint'];
-    if (jdata && jdata.blob) {
-      const url = await blobToDataUrl(jdata.blob);
-      const fit = calcImageFit(jW - pad * 2, jPhotoAreaH - pad * 2, 9, 16);
-      slide.addImage({
-        data: url,
-        x: jX + pad + fit.offX,
-        y: yCnt + lblH + pad + fit.offY,
-        w: fit.w,
-        h: fit.h,
-      });
-    }
-
-    // ── 우측 사진 영역 ───────────────────────────────────────
-    const rX = sX + jW;
-
-    // ── Row 1: #1 INTERFACE (4:3) + #2 BEARING FACE (4:3) ──
-    // row1CellH = cntH - row2CellH (Row2 확정 후 나머지 전부)
-    const row1Y    = yCnt;
-    const row1Defs = [
-      { id: 'interface',    label: '#1', ratio: [4, 3] },
-      { id: 'bearing_face', label: '#2', ratio: [4, 3] },
+      // R4 — 사진 행2 (C0 rowspan 계속 → 셀 3개: cs=2씩)
+      [
+        { text: '', options: { colspan:2, fill:{color:'FFFFFF'}, border:BORDER } },
+        { text: '', options: { colspan:2, fill:{color:'FFFFFF'}, border:BORDER } },
+        { text: '', options: { colspan:2, fill:{color:'FFFFFF'}, border:BORDER } },
+      ],
     ];
 
-    for (let i = 0; i < row1Defs.length; i++) {
-      const item  = row1Defs[i];
-      const cellX = rX + i * cellW12;
-      const cellY = row1Y;
+    slide.addTable(tableRows, {
+      x:    sX,
+      y:    startY,
+      colW: colWArr,
+      rowH: rowHArr,
+    });
 
-      slide.addShape('rect', {
-        x: cellX, y: cellY, w: cellW12, h: row1CellH,
-        fill: { type: 'none' },
-        line: { color: T.cellBorder, width: 0.5 },
-      });
-      slide.addShape('rect', {
-        x: cellX, y: cellY, w: cellW12, h: lblH,
-        fill: { color: T.hdrCell }, line: { type: 'none' },
-      });
-      slide.addText(item.label, {
-        x: cellX, y: cellY, w: cellW12, h: lblH,
-        fontSize: 10, bold: true, color: T.hdrText,
-        fontFace: 'Arial', align: 'center', valign: 'middle',
-      });
+    // ── 이미지 오버레이: 셀 좌표 누적 계산 ──────────────────
+    // colWArr = [jW, u, u, u, u, u, u]
+    // rowHArr = [secHdrH, lblH, row1PhotoH, lblH, row2PhotoH]
+    const tx = sX;
+    const ty = startY;
 
-      const idata = (visualData[side] || {})[item.id];
-      if (idata && idata.blob) {
-        const url = await blobToDataUrl(idata.blob);
-        const fit = calcImageFit(cellW12 - pad * 2, row1PhotoH - pad * 2, item.ratio[0], item.ratio[1]);
-        slide.addImage({
-          data: url,
-          x: cellX + pad + fit.offX,
-          y: cellY + lblH + pad + fit.offY,
-          w: fit.w,
-          h: fit.h,
-        });
+    // JOINT 사진 : R2~R4, C0
+    {
+      const cx = tx;
+      const cy = ty + rowHArr[0] + rowHArr[1];                                // after R0+R1
+      const cw = colWArr[0];                                                   // jW
+      const ch = rowHArr[2] + rowHArr[3] + rowHArr[4];                        // R2+R3+R4
+      const d  = sd['joint'];
+      if (d && d.blob) {
+        const url = await blobToDataUrl(d.blob);
+        const fit = calcImageFit(cw - pad*2, ch - pad*2, 9, 16);
+        slide.addImage({ data:url, x:cx+pad+fit.offX, y:cy+pad+fit.offY, w:fit.w, h:fit.h });
       }
     }
 
-    // ── Row 2: #3 CLAMP-JOINT (9:16) + #4 BOOT (4:3) + #5 CLAMP-SHAFT (9:16) ──
-    // 세 칸 모두 row2CellH (고정값) 사용 → 픽셀 단위 동일 보장
-    // row2CellH = #4 BOOT(4:3)의 자연 높이 기준 ≈ 1.45"
-    const row2Y    = yCnt + row1CellH;   // Row1 바로 아래
-    const row2Defs = [
-      { id: 'clamp_joint',  label: '#3', ratio: [9, 16] },
-      { id: 'boot',         label: '#4', ratio: [4, 3]  },
-      { id: 'clamp_shaft',  label: '#5', ratio: [9, 16] },
-    ];
+    // #1 INTERFACE : R2, C1-C3
+    {
+      const cx = tx + colWArr[0];
+      const cy = ty + rowHArr[0] + rowHArr[1];
+      const cw = u * 3;
+      const ch = rowHArr[2];
+      const d  = sd['interface'];
+      if (d && d.blob) {
+        const url = await blobToDataUrl(d.blob);
+        const fit = calcImageFit(cw - pad*2, ch - pad*2, 4, 3);
+        slide.addImage({ data:url, x:cx+pad+fit.offX, y:cy+pad+fit.offY, w:fit.w, h:fit.h });
+      }
+    }
 
-    for (let i = 0; i < row2Defs.length; i++) {
-      const item  = row2Defs[i];
-      const cellX = rX + i * cellW3;
-      const cellY = row2Y;
+    // #2 BEARING FACE : R2, C4-C6
+    {
+      const cx = tx + colWArr[0] + u * 3;
+      const cy = ty + rowHArr[0] + rowHArr[1];
+      const cw = u * 3;
+      const ch = rowHArr[2];
+      const d  = sd['bearing_face'];
+      if (d && d.blob) {
+        const url = await blobToDataUrl(d.blob);
+        const fit = calcImageFit(cw - pad*2, ch - pad*2, 4, 3);
+        slide.addImage({ data:url, x:cx+pad+fit.offX, y:cy+pad+fit.offY, w:fit.w, h:fit.h });
+      }
+    }
 
-      // 세 칸 완전히 동일한 row2CellH (h값 고정)
-      slide.addShape('rect', {
-        x: cellX, y: cellY, w: cellW3, h: row2CellH,
-        fill: { type: 'none' },
-        line: { color: T.cellBorder, width: 0.5 },
-      });
-      slide.addShape('rect', {
-        x: cellX, y: cellY, w: cellW3, h: lblH,
-        fill: { color: T.hdrCell }, line: { type: 'none' },
-      });
-      slide.addText(item.label, {
-        x: cellX, y: cellY, w: cellW3, h: lblH,
-        fontSize: 10, bold: true, color: T.hdrText,
-        fontFace: 'Arial', align: 'center', valign: 'middle',
-      });
+    // Row2 기준 Y: R0+R1+R2+R3 누적
+    const row2BaseY = ty + rowHArr[0] + rowHArr[1] + rowHArr[2] + rowHArr[3];
 
-      const idata = (visualData[side] || {})[item.id];
-      if (idata && idata.blob) {
-        const url = await blobToDataUrl(idata.blob);
-        // contain-fit 중앙 정렬 (#3/#5는 9:16 → 좌우 여백, #4는 4:3 → 상하 여백)
-        const fit = calcImageFit(cellW3 - pad * 2, row2PhotoH - pad * 2, item.ratio[0], item.ratio[1]);
-        slide.addImage({
-          data: url,
-          x: cellX + pad + fit.offX,
-          y: cellY + lblH + pad + fit.offY,
-          w: fit.w,
-          h: fit.h,
-        });
+    // #3 CLAMP-JOINT : R4, C1-C2
+    {
+      const cx = tx + colWArr[0];
+      const cw = u * 2;
+      const ch = rowHArr[4];
+      const d  = sd['clamp_joint'];
+      if (d && d.blob) {
+        const url = await blobToDataUrl(d.blob);
+        const fit = calcImageFit(cw - pad*2, ch - pad*2, 9, 16);
+        slide.addImage({ data:url, x:cx+pad+fit.offX, y:row2BaseY+pad+fit.offY, w:fit.w, h:fit.h });
+      }
+    }
+
+    // #4 BOOT : R4, C3-C4
+    {
+      const cx = tx + colWArr[0] + u * 2;
+      const cw = u * 2;
+      const ch = rowHArr[4];
+      const d  = sd['boot'];
+      if (d && d.blob) {
+        const url = await blobToDataUrl(d.blob);
+        const fit = calcImageFit(cw - pad*2, ch - pad*2, 4, 3);
+        slide.addImage({ data:url, x:cx+pad+fit.offX, y:row2BaseY+pad+fit.offY, w:fit.w, h:fit.h });
+      }
+    }
+
+    // #5 CLAMP-SHAFT : R4, C5-C6
+    {
+      const cx = tx + colWArr[0] + u * 4;
+      const cw = u * 2;
+      const ch = rowHArr[4];
+      const d  = sd['clamp_shaft'];
+      if (d && d.blob) {
+        const url = await blobToDataUrl(d.blob);
+        const fit = calcImageFit(cw - pad*2, ch - pad*2, 9, 16);
+        slide.addImage({ data:url, x:cx+pad+fit.offX, y:row2BaseY+pad+fit.offY, w:fit.w, h:fit.h });
       }
     }
   }
 }
 
-// ── Visual PPT 메인 생성 함수 ───────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Visual PPT 메인 생성 함수
+// ═══════════════════════════════════════════════════════════════
 window.generateVisualPPT = async function({ visualData }) {
   if (typeof PptxGenJS === 'undefined') {
     throw new Error('pptxgenjs 라이브러리가 로드되지 않았습니다.');
@@ -484,16 +456,15 @@ window.generateVisualPPT = async function({ visualData }) {
   return { blob, fileName };
 };
 
-// ── 메인 생성 함수 ──────────────────────────────────────────────
-// 반환값: { blob: Blob, fileName: string }
+// ═══════════════════════════════════════════════════════════════
+// 360° PPT 메인 생성 함수
+// ═══════════════════════════════════════════════════════════════
 window.generateJointReportPPT = async function({ capturedData, selectedSides, segments }) {
   if (typeof PptxGenJS === 'undefined') {
     throw new Error('pptxgenjs 라이브러리가 로드되지 않았습니다. 인터넷 연결을 확인해 주세요.');
   }
-
   const pptx = new PptxGenJS();
-  pptx.layout = 'LAYOUT_WIDE'; // 13.33" × 7.5"
-
+  pptx.layout = 'LAYOUT_WIDE';
   const now = new Date();
 
   // 1. 표지
@@ -504,40 +475,31 @@ window.generateJointReportPPT = async function({ capturedData, selectedSides, se
     if (!selectedSides[side]) continue;
     const sideLabel = side === 'outboard' ? 'Outboard' : 'Inboard';
     const segs      = segments[side] || 6;
-    const raceCols  = segs <= 6 ? 3 : 4;  // OUTER/INNER RACE 기본 cols
+    const raceCols  = segs <= 6 ? 3 : 4;
     const sideData  = capturedData[side];
 
     for (const prod of PRODUCTS_DEF) {
       const shots = sideData[prod.id] || [];
       if (shots.length === 0) continue;
-
       const ratio = CROP_RATIO_PPT[prod.id];
 
       if (prod.id === 'ball') {
-        // BALL: 중앙 4:3 단일 슬라이드
         await addBallSlide(pptx, `BALL  —  ${sideLabel}`, shots[0]);
 
       } else if (prod.id === 'cage') {
-        // CAGE: 앞·뒤 전체를 1장에
-        //   6구간 → 3cols × 4rows (F1~F6, B1~B6)
-        //   8구간 → 4cols × 4rows (F1~F8, B1~B8)
-        const cageCols = segs <= 6 ? 3 : 4;
+        const cageCols   = segs <= 6 ? 3 : 4;
         const cageLabels = [
-          ...Array.from({ length: segs }, (_, i) => `F${i + 1}`),  // 앞면
-          ...Array.from({ length: segs }, (_, i) => `B${i + 1}`),  // 뒷면
+          ...Array.from({ length: segs }, (_, i) => `F${i + 1}`),
+          ...Array.from({ length: segs }, (_, i) => `B${i + 1}`),
         ];
-        await addProductSlide(
-          pptx, `CAGE  —  ${sideLabel}`, shots, cageCols, ratio, cageLabels
-        );
+        await addProductSlide(pptx, `CAGE  —  ${sideLabel}`, shots, cageCols, ratio, cageLabels);
 
       } else {
-        // OUTER RACE / INNER RACE (3:4)
         await addProductSlide(pptx, `${prod.name}  —  ${sideLabel}`, shots, raceCols, ratio);
       }
     }
   }
 
-  // Blob으로 반환 (로컬 다운로드 없음)
   const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
   const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, '');
   const fileName = `JointReport_${dateStr}_${timeStr}.pptx`;
