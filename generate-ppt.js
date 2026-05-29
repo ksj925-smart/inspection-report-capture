@@ -253,18 +253,20 @@ function addVisualCoverSlide(pptx, date) {
 //  startY = 2.08cm  (= 0.82" 슬라이드헤더 높이)
 //
 //  열 폭:
-//    jW      = (9/16)×8 + 0.4 = 4.90cm   (JOINT: 사진폭 4.5cm + 여백 0.4cm)
-//    rW      = 16.385 - 4.90 = 11.485cm
-//    cell12W = rW / 2        = 5.743cm   (#1, #2 각 셀)
-//    cell345W= rW / 3        = 3.828cm   (#3, #4, #5 각 셀)
+//    jW         = (9/16)×8 + 0.4  = 4.900cm  (JOINT: 사진폭 4.5cm + 여백)
+//    rW         = 16.385 - 4.900  = 11.485cm
+//    cell12W    = rW / 2          = 5.743cm  (#1, #2)
+//    cell345W_35= (9/16)×5.5+0.2  = 3.294cm  (#3, #5 — 9:16 사진폭 기준)
+//    cell345W_4 = rW - 3.294×2    = 4.897cm  (#4)
 //
-//  사진 높이 고정값 + 셀 높이 (lblH=0.70cm, pad=0.20cm):
-//    JOINT  (9:16)  pH=8.00cm  →  cell_J_h  = 12.20cm (Row1+Row2 합)
-//    #1,#2  (4:3)   pH=6.00cm  →  cell_12_h = 7.10cm
-//    #3~#5         pH=4.00cm  →  cell_345_h= 5.10cm
+//  사진 높이 + 셀 높이 (lblH=0.70cm, pad=0.20/pad2=0.10cm):
+//    JOINT (9:16) pH=8.00cm → cell_J_h  = 13.50cm (Row1+Row2 합)
+//    #1,#2 (4:3)  pH=6.00cm → cell_12_h = 7.10cm  (pad=0.20)
+//    #3~#5        pH=5.50cm → cell_345_h= 6.40cm  (pad2=0.10)
 //
-//  섹션 총 높이: secHdrH(0.70) + cell_J_h(12.20) = 12.90cm
-//  사용 높이   : startY(2.08) + 12.90 = 14.98cm  < 19.05cm ✓
+//  #3/#5 contain-fit: calcImageFit(3.094, 5.50, 9,16) → 3.09×5.50cm ✓ 완벽
+//  섹션 총 높이: 0.70 + 13.50 = 14.20cm
+//  사용 높이   : 2.08 + 14.20 = 16.28cm < 19.05cm ✓
 // ═══════════════════════════════════════════════════════════════
 async function addVisualSlide(pptx, visualData) {
   const slide = pptx.addSlide();
@@ -282,42 +284,41 @@ async function addVisualSlide(pptx, visualData) {
   const startY   = 2.08;   // 슬라이드 헤더 하단 (0.82" × 2.54)
   const secHdrH  = 0.70;   // 섹션 헤더 높이
   const lblH     = 0.70;   // 셀 레이블 높이
-  const pad      = 0.20;   // 사진 내부 여백
+  const pad      = 0.20;   // JOINT / Row1 여백
+  const pad2     = 0.10;   // Row2 (#3~#5) 여백 — 50% 축소
 
   // ── 사진 높이 고정값 (cm) ────────────────────────────────────
   const pH_J   = 8.00;   // JOINT  (9:16)
   const pH_12  = 6.00;   // #1, #2 (4:3)
-  const pH_345 = 4.00;   // #3~#5
+  const pH_345 = 5.50;   // #3~#5 통일 (5.5cm)
 
   // ── 열 폭 계산 ────────────────────────────────────────────────
-  const jW       = (9 / 16) * pH_J + pad * 2;  // 4.90cm
-  const rW       = sW - jW;                      // 11.485cm
-  const cell12W  = rW / 2;                       // 5.7425cm
-  const cell345W = rW / 3;                       // 3.8283cm
+  const jW          = (9 / 16) * pH_J + pad * 2;        // 4.900cm
+  const rW          = sW - jW;                            // 11.485cm
+  const cell12W     = rW / 2;                             // 5.7425cm
+  // #3/#5: 9:16 사진 너비(=3.094cm) + 좌우 여백(pad2×2) → 세로 강조
+  const cell345W_35 = (9 / 16) * pH_345 + pad2 * 2;     // 3.09375 + 0.20 = 3.294cm
+  const cell345W_4  = rW - cell345W_35 * 2;              // 11.485 - 6.588 = 4.897cm
 
   // ── 셀 높이 계산 ────────────────────────────────────────────────
-  const cell_12_h  = lblH + pad + pH_12  + pad;  // 7.10cm
-  const cell_345_h = lblH + pad + pH_345 + pad;  // 5.10cm
-  const cell_J_h   = cell_12_h + cell_345_h;     // 12.20cm (JOINT: 두 행 전체)
+  const cell_12_h  = lblH + pad  + pH_12  + pad;   // 0.70+0.20+6.00+0.20 = 7.10cm
+  const cell_345_h = lblH + pad2 + pH_345 + pad2;  // 0.70+0.10+5.50+0.10 = 6.40cm
+  const cell_J_h   = cell_12_h + cell_345_h;        // 7.10 + 6.40 = 13.50cm (JOINT 전체)
 
   // ── 테두리 스타일 ────────────────────────────────────────────
   const BC = T.cellBorder;  // 'BFBFBF'
   const BW = 0.5;           // pt
 
   // ── 셀 드로우 헬퍼 ───────────────────────────────────────────
-  // 외곽 테두리 + 레이블 배경 + 레이블 텍스트
   function drawCell(x_cm, y_cm, w_cm, h_cm, labelText) {
-    // 외곽 테두리
     slide.addShape('rect', {
       x: c(x_cm), y: c(y_cm), w: c(w_cm), h: c(h_cm),
       fill: { type: 'none' }, line: { color: BC, width: BW },
     });
-    // 레이블 배경 (네이비)
     slide.addShape('rect', {
       x: c(x_cm), y: c(y_cm), w: c(w_cm), h: c(lblH),
       fill: { color: T.hdrCell }, line: { type: 'none' },
     });
-    // 레이블 텍스트
     slide.addText(labelText, {
       x: c(x_cm), y: c(y_cm), w: c(w_cm), h: c(lblH),
       fontSize: 11, bold: true, color: T.hdrText,
@@ -325,7 +326,7 @@ async function addVisualSlide(pptx, visualData) {
     });
   }
 
-  // ── 이미지 배치 헬퍼 (사진영역 안에 contain-fit 중앙 배치) ──
+  // ── 이미지 배치 헬퍼 (contain-fit 중앙 배치) ────────────────
   async function drawPhoto(photoX_cm, photoY_cm, areaW_cm, areaH_cm, rw, rh, data) {
     if (!data || !data.blob) return;
     const url = await blobToDataUrl(data.blob);
@@ -343,15 +344,14 @@ async function addVisualSlide(pptx, visualData) {
   for (let idx = 0; idx < 2; idx++) {
     const side   = idx === 0 ? 'outboard' : 'inboard';
     const sX     = margin + idx * (sW + secGap);  // 섹션 시작 X (cm)
-    const sY     = startY;                         // 섹션 시작 Y (cm)
+    const sY     = startY;
     const sLabel = idx === 0 ? 'OBJ  —  OUTBOARD' : 'IBJ  —  INBOARD';
     const jLabel = idx === 0 ? 'OBJ' : 'IBJ';
     const sd     = visualData[side] || {};
-    const cY     = sY + secHdrH;  // 콘텐츠 영역 시작 Y (cm)
+    const cY     = sY + secHdrH;  // 콘텐츠 시작 Y
 
-    // ┌─────────────────────────────────────────────────┐
-    // │  섹션 헤더 (전체 폭, 미드 네이비)                  │ h=0.70cm
-    // └─────────────────────────────────────────────────┘
+    // ── 섹션 헤더 ──────────────────────────────────────────────
+    // x=sX, y=sY, w=sW, h=0.70cm
     slide.addShape('rect', {
       x: c(sX), y: c(sY), w: c(sW), h: c(secHdrH),
       fill: { color: T.secHdr }, line: { type: 'none' },
@@ -362,86 +362,80 @@ async function addVisualSlide(pptx, visualData) {
       fontFace: 'Arial', align: 'center', valign: 'middle',
     });
 
-    // ┌───────────┬──────────────┬──────────────┐
-    // │  JOINT    │     #1       │     #2       │  ← Row 1 (h=7.10cm)
-    // │  OBJ/IBJ  ├──────┬───────┬──────┤
-    // │  (9:16)   │  #3  │  #4   │  #5  │  ← Row 2 (h=5.10cm)
-    // └───────────┴──────┴───────┴──────┘
+    // ┌──────────────┬─────────────────┬────────────────┐
+    // │   JOINT      │      #1         │      #2        │  h=7.10cm
+    // │  (9:16 세로) ├────────┬──────────────┬──────────┤
+    // │  4.90cm 폭   │ #3     │    #4        │    #5    │  h=6.40cm
+    // │              │ 3.29cm │   4.90cm     │  3.29cm  │
+    // └──────────────┴────────┴──────────────┴──────────┘
 
     // ══ JOINT 셀 ══════════════════════════════════════════════
-    // x=sX, y=cY, w=jW, h=cell_J_h(=12.20cm, Row1+Row2 전체)
+    // x=sX, y=cY, w=4.90cm, h=13.50cm (Row1+Row2 전체 커버)
     drawCell(sX, cY, jW, cell_J_h, jLabel);
-    // 사진 영역: 레이블 아래, pad 여백 포함
     await drawPhoto(
-      sX + pad,            // photoX
-      cY + lblH + pad,     // photoY
-      jW - pad * 2,        // areaW = 4.50cm
-      cell_J_h - lblH - pad * 2,  // areaH = 11.10cm → 사진 8cm 높이로 contain-fit
-      9, 16,
-      sd['joint']
+      sX + pad, cY + lblH + pad,
+      jW - pad * 2,                   // 4.50cm
+      cell_J_h - lblH - pad * 2,      // 12.40cm → 9:16 fit → 4.50×8.00cm
+      9, 16, sd['joint']
     );
 
     // ══ Row 1: #1 INTERFACE (4:3) ══════════════════════════════
-    // x=sX+jW, y=cY, w=cell12W, h=cell_12_h
+    // x=sX+jW, y=cY, w=5.743cm, h=7.10cm
     const x1 = sX + jW;
     drawCell(x1, cY, cell12W, cell_12_h, '#1');
     await drawPhoto(
       x1 + pad, cY + lblH + pad,
-      cell12W - pad * 2,  // 5.343cm
-      pH_12,              // 6.00cm
-      4, 3,
-      sd['interface']
+      cell12W - pad * 2,   // 5.343cm
+      pH_12,               // 6.00cm
+      4, 3, sd['interface']
     );
 
     // ══ Row 1: #2 BEARING FACE (4:3) ═══════════════════════════
-    // x=sX+jW+cell12W, y=cY, w=cell12W, h=cell_12_h
+    // x=sX+jW+cell12W, y=cY, w=5.743cm, h=7.10cm
     const x2 = sX + jW + cell12W;
     drawCell(x2, cY, cell12W, cell_12_h, '#2');
     await drawPhoto(
       x2 + pad, cY + lblH + pad,
       cell12W - pad * 2,
       pH_12,
-      4, 3,
-      sd['bearing_face']
+      4, 3, sd['bearing_face']
     );
 
-    // ══ Row 2 기준 Y ════════════════════════════════════════════
-    const row2Y = cY + cell_12_h;  // 콘텐츠Y + 7.10cm
+    // ══ Row 2 기준 Y = cY + 7.10cm ══════════════════════════════
+    const row2Y = cY + cell_12_h;
 
     // ══ Row 2: #3 CLAMP-JOINT (9:16) ═══════════════════════════
-    // x=sX+jW, y=row2Y, w=cell345W, h=cell_345_h
+    // x=sX+jW, y=row2Y, w=3.294cm, h=6.40cm
+    // areaW=3.094cm, areaH=5.50cm → fit: 3.094×5.50cm ✓ 완벽
     const x3 = sX + jW;
-    drawCell(x3, row2Y, cell345W, cell_345_h, '#3');
+    drawCell(x3, row2Y, cell345W_35, cell_345_h, '#3');
     await drawPhoto(
-      x3 + pad, row2Y + lblH + pad,
-      cell345W - pad * 2,  // 3.428cm
-      pH_345,              // 4.00cm
-      9, 16,
-      sd['clamp_joint']
+      x3 + pad2, row2Y + lblH + pad2,
+      cell345W_35 - pad2 * 2,   // 3.094cm
+      pH_345,                    // 5.50cm
+      9, 16, sd['clamp_joint']
     );
 
     // ══ Row 2: #4 BOOT (4:3) ════════════════════════════════════
-    // x=sX+jW+cell345W, y=row2Y, w=cell345W, h=cell_345_h
-    const x4 = sX + jW + cell345W;
-    drawCell(x4, row2Y, cell345W, cell_345_h, '#4');
+    // x=sX+jW+cell345W_35, y=row2Y, w=4.897cm, h=6.40cm
+    const x4 = sX + jW + cell345W_35;
+    drawCell(x4, row2Y, cell345W_4, cell_345_h, '#4');
     await drawPhoto(
-      x4 + pad, row2Y + lblH + pad,
-      cell345W - pad * 2,
-      pH_345,
-      4, 3,
-      sd['boot']
+      x4 + pad2, row2Y + lblH + pad2,
+      cell345W_4 - pad2 * 2,    // 4.697cm
+      pH_345,                    // 5.50cm (4:3 → 너비 기준 contain-fit)
+      4, 3, sd['boot']
     );
 
     // ══ Row 2: #5 CLAMP-SHAFT (9:16) ════════════════════════════
-    // x=sX+jW+cell345W×2, y=row2Y, w=cell345W, h=cell_345_h
-    const x5 = sX + jW + cell345W * 2;
-    drawCell(x5, row2Y, cell345W, cell_345_h, '#5');
+    // x=sX+jW+cell345W_35+cell345W_4, y=row2Y, w=3.294cm, h=6.40cm
+    const x5 = sX + jW + cell345W_35 + cell345W_4;
+    drawCell(x5, row2Y, cell345W_35, cell_345_h, '#5');
     await drawPhoto(
-      x5 + pad, row2Y + lblH + pad,
-      cell345W - pad * 2,
+      x5 + pad2, row2Y + lblH + pad2,
+      cell345W_35 - pad2 * 2,
       pH_345,
-      9, 16,
-      sd['clamp_shaft']
+      9, 16, sd['clamp_shaft']
     );
   }
 }
