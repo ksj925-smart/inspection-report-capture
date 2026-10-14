@@ -149,6 +149,8 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
   const videoRef       = useRef(null);
   const streamRef      = useRef(null);
   const lastPinchDist  = useRef(null);
+  const imageCapRef    = useRef(null);
+  const shootingRef    = useRef(false);
   const [camReady, setCamReady] = useState(false);
   const [flash,    setFlash]    = useState(false);
   const [camError, setCamError] = useState(null);
@@ -168,6 +170,15 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
         });
         if (cancelled) { stream.getTracks().forEach(t=>t.stop()); return; }
         streamRef.current = stream;
+        // 고화질 사진 촬영 준비 (ImageCapture 미지원 기기는 기존 동영상 캡처로 동작)
+        if ('ImageCapture' in window) {
+          try {
+            const ic = new ImageCapture(stream.getVideoTracks()[0]);
+            const pc = await ic.getPhotoCapabilities();
+            imageCapRef.current = { ic,
+              settings: pc.imageWidth?.max ? { imageWidth:pc.imageWidth.max, imageHeight:pc.imageHeight.max } : {} };
+          } catch(e) { imageCapRef.current = null; }
+        }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play();
@@ -209,38 +220,66 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
   }, []);
   const handleTouchEnd = useCallback(() => { lastPinchDist.current=null; }, []);
 
-  // 셔터 (비율 크롭 + 소프트웨어 줌)
+  // 고화질 사진 촬영 (ImageCapture.takePhoto) — 실패하면 null
+  const takeHighResPhoto = async () => {
+    if (!imageCapRef.current) return null;
+    try {
+      const { ic, settings } = imageCapRef.current;
+      const blob = await ic.takePhoto(settings);
+      const img  = new Image();
+      img.src = URL.createObjectURL(blob);
+      await img.decode();   // EXIF 회전이 반영된 크기
+      URL.revokeObjectURL(img.src);
+      return img;
+    } catch(e) { return null; }
+  };
+
+  // 셔터 (고화질 사진 → 미리보기 범위 맞춤 → 비율 크롭 + 소프트웨어 줌)
   const handleShutter = useCallback(async () => {
-    if (!videoRef.current || !camReady) return;
+    if (!videoRef.current || !camReady || shootingRef.current) return;
+    shootingRef.current = true;
     setFlash(true); setTimeout(()=>setFlash(false), 120);
-    const video = videoRef.current;
-    const vw = video.videoWidth  || 1280;
-    const vh = video.videoHeight || 720;
-    const [rw, rh] = CROP_RATIO[product.id] || [4, 3];
+    try {
+      const video = videoRef.current;
+      const vw = video.videoWidth  || 1280;
+      const vh = video.videoHeight || 720;
+      const [rw, rh] = CROP_RATIO[product.id] || [4, 3];
 
-    // 1. 비율 크롭
-    let srcX, srcY, srcW, srcH;
-    if (vw/vh > rw/rh) {
-      srcH=vh; srcW=vh*rw/rh; srcX=(vw-srcW)/2; srcY=0;
-    } else {
-      srcW=vw; srcH=vw*rh/rw; srcX=0; srcY=(vh-srcH)/2;
+      // 0. 촬영 원본: 고화질 사진, 안 되면 기존처럼 동영상 프레임
+      let source = video, baseX = 0, baseY = 0, baseW = vw, baseH = vh;
+      const photo = await takeHighResPhoto();
+      if (photo && (photo.naturalWidth > photo.naturalHeight) === (vw > vh)) {
+        // 사진은 미리보기(동영상)보다 넓게 찍히므로, 미리보기와 같은 범위로 먼저 맞춤
+        const pw = photo.naturalWidth, ph = photo.naturalHeight;
+        source = photo;
+        if (pw/ph > vw/vh) { baseH=ph; baseW=ph*vw/vh; baseX=(pw-baseW)/2; }
+        else               { baseW=pw; baseH=pw*vh/vw; baseY=(ph-baseH)/2; }
+      }
+
+      // 1. 비율 크롭
+      let srcX, srcY, srcW, srcH;
+      if (baseW/baseH > rw/rh) {
+        srcH=baseH; srcW=baseH*rw/rh; srcX=baseX+(baseW-srcW)/2; srcY=baseY;
+      } else {
+        srcW=baseW; srcH=baseW*rh/rw; srcX=baseX; srcY=baseY+(baseH-srcH)/2;
+      }
+
+      // 2. 소프트웨어 줌 (중심 기준 축소)
+      if (zoomLevel !== 1) {
+        const zw=srcW/zoomLevel, zh=srcH/zoomLevel;
+        srcX += (srcW-zw)/2; srcY += (srcH-zh)/2;
+        srcW=zw; srcH=zh;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(srcW);
+      canvas.height = Math.round(srcH);
+      canvas.getContext('2d').drawImage(source, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+      onCapture(blob, URL.createObjectURL(blob));
+    } finally {
+      shootingRef.current = false;
     }
-
-    // 2. 소프트웨어 줌 (중심 기준 축소)
-    if (zoomLevel !== 1) {
-      const zw=srcW/zoomLevel, zh=srcH/zoomLevel;
-      srcX += (srcW-zw)/2; srcY += (srcH-zh)/2;
-      srcW=zw; srcH=zh;
-    }
-
-    const canvas = document.createElement('canvas');
-    canvas.width  = Math.round(srcW);
-    canvas.height = Math.round(srcH);
-    canvas.getContext('2d').drawImage(video, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
-    canvas.toBlob(blob=>{
-      const url = URL.createObjectURL(blob);
-      onCapture(blob, url);
-    }, 'image/jpeg', 0.92);
   }, [camReady, onCapture, product.id, zoomLevel]);
 
   if (camError) return (
