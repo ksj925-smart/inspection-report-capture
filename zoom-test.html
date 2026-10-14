@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>3배 줌 화질 비교</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #0B0C0E; color: #F5F5F7;
+    font-family: -apple-system, system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #9CA0AA; font-size: 12px; margin-bottom: 16px; }
+  button, label.btn { display: flex; align-items: center; justify-content: center; width: 100%; height: 52px;
+    border-radius: 12px; border: none; font-size: 15px; font-weight: 700; background: #C8FF3D; color: #0B0C0E; margin-bottom: 8px; }
+  button.sec { background: #1C1F25; color: #F5F5F7; border: 1px solid #363A42; }
+  button:disabled { opacity: .4; }
+  video { width: 100%; border-radius: 12px; background: #000; display: block; margin-bottom: 12px; }
+  .card { background: #15171B; border: 1px solid #26292F; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; color: #C8FF3D; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { padding: 6px 4px; border-bottom: 1px solid #26292F; text-align: left; vertical-align: top; }
+  th { color: #9CA0AA; font-weight: 500; }
+  .ok { color: #C8FF3D; } .bad { color: #FF5A47; } .dim { color: #9CA0AA; font-size: 12px; }
+  .shot img { width: 100%; border-radius: 8px; display: block; margin-top: 6px; }
+  .shot a { color: #9CA0AA; font-size: 12px; }
+  .bar { height: 10px; background: #C8FF3D; border-radius: 5px; margin-top: 4px; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<h1>3배 줌 화질 비교</h1>
+<div class="sub">같은 부품을 3가지 방법으로 3배 확대해 찍고, 선명도를 숫자로 비교합니다.<br/>
+폰을 고정(받침대·책 위 등)하고, 부품에서 <b>같은 거리</b>를 유지한 채 진행하세요.</div>
+
+<div class="card">
+  <h2>A·B. 웹앱 안에서 3배</h2>
+  <div class="dim">A = 지금 방식(1배로 찍고 가운데 잘라내기) · B = 폰 카메라 줌 기능 사용</div>
+  <button id="btnStart" style="margin-top:10px">1. 카메라 켜기</button>
+  <video id="v" playsinline muted autoplay></video>
+  <button id="btnAB" disabled>2. A·B 촬영 (약 3초, 움직이지 마세요)</button>
+  <div id="status" class="dim"></div>
+</div>
+
+<div class="card">
+  <h2>C. 삼성 기본 카메라 앱으로 3배</h2>
+  <div class="dim">아래 버튼을 누르면 삼성 카메라가 열립니다. <b>3배 버튼을 누르고</b> 같은 부품을 찍은 뒤 ✓(확인)을 누르세요.<br/>
+  ※ 카메라 화면 대신 사진 선택 화면이 뜨면 "카메라"를 고르세요.</div>
+  <label class="btn" for="fileC" style="margin-top:10px">3. 삼성 카메라 열기</label>
+  <input id="fileC" type="file" accept="image/*" capture="environment"/>
+</div>
+
+<div id="out"></div>
+<button id="btnCopy" class="sec" style="display:none">결과 복사하기 (Claude에게 붙여넣기)</button>
+
+<script>
+const $ = id => document.getElementById(id);
+let stream = null, track = null, ic = null, photoSettings = {};
+const results = {};   // A, B, C → { w, h, kb, sharp, url, note }
+const report = { ua: navigator.userAgent };
+
+const mp = (w, h) => (w * h / 1e6).toFixed(1) + 'MP';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+$('btnStart').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false,
+    });
+    track = stream.getVideoTracks()[0];
+    $('v').srcObject = stream; await $('v').play();
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    report.zoomRange = caps.zoom ? `${caps.zoom.min}~${caps.zoom.max} (step ${caps.zoom.step})` : '지원 안 함';
+    report.focusModes = caps.focusMode ? caps.focusMode.join(',') : '정보 없음';
+    report.focusDistance = caps.focusDistance ? `${caps.focusDistance.min}~${caps.focusDistance.max}` : '정보 없음';
+    if ('ImageCapture' in window) {
+      ic = new ImageCapture(track);
+      const pc = await ic.getPhotoCapabilities();
+      if (pc.imageWidth?.max) photoSettings = { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max };
+    }
+    $('btnAB').disabled = !ic;
+    $('btnStart').textContent = '카메라 켜짐'; $('btnStart').disabled = true;
+    $('status').textContent = `카메라 줌 범위: ${report.zoomRange}` + (ic ? '' : ' · 사진 촬영 기능 없음');
+  } catch (e) { $('status').innerHTML = `<span class="bad">카메라를 켜지 못했습니다: ${e.message}</span>`; }
+};
+
+async function loadImage(blob) {
+  const img = new Image();
+  img.src = URL.createObjectURL(blob);
+  await img.decode();
+  return img;
+}
+
+// 선명도: 같은 크기(900×1200)로 맞춘 뒤 가운데 영역의 경계 강도 평균 (클수록 선명)
+function sharpness(src, sx, sy, sw, sh) {
+  const W = 900, H = 1200;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, sx, sy, sw, sh, 0, 0, W, H);
+  const d = ctx.getImageData(150, 200, 600, 800).data;   // 가운데 영역만
+  const w = 600, h = 800, g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  let sum = 0;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const i = y * w + x;
+    sum += Math.abs(4 * g[i] - g[i - 1] - g[i + 1] - g[i - w] - g[i + w]);
+  }
+  return +(sum / ((w - 2) * (h - 2))).toFixed(2);
+}
+
+// 3:4 세로 비율로 가운데 자르기 영역 (외륜 기준과 같은 비율)
+function crop34(w, h, zoom) {
+  let cw, ch;
+  if (w / h > 3 / 4) { ch = h; cw = h * 3 / 4; } else { cw = w; ch = w * 4 / 3; }
+  cw /= zoom; ch /= zoom;
+  return [(w - cw) / 2, (h - ch) / 2, cw, ch];
+}
+
+function toBlobUrl(src, sx, sy, sw, sh) {
+  const c = document.createElement('canvas');
+  c.width = Math.round(sw); c.height = Math.round(sh);
+  c.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, c.width, c.height);
+  return new Promise(r => c.toBlob(b => r({ url: URL.createObjectURL(b), kb: Math.round(b.size / 1024), w: c.width, h: c.height }), 'image/jpeg', 0.92));
+}
+
+$('btnAB').onclick = async () => {
+  $('btnAB').disabled = true;
+  try {
+    // A. 지금 방식: 줌 1배로 찍고 가운데 1/3 잘라내기
+    $('status').textContent = 'A 촬영 중...';
+    if (track.getCapabilities?.().zoom) { await track.applyConstraints({ advanced: [{ zoom: 1 }] }); await sleep(800); }
+    let img = await loadImage(await ic.takePhoto(photoSettings));
+    let [sx, sy, sw, sh] = crop34(img.naturalWidth, img.naturalHeight, 3);
+    results.A = { ...(await toBlobUrl(img, sx, sy, sw, sh)), sharp: sharpness(img, sx, sy, sw, sh), note: `원본 ${img.naturalWidth}×${img.naturalHeight}에서 잘라냄` };
+
+    // B. 카메라 줌 기능 3배
+    if (track.getCapabilities?.().zoom) {
+      $('status').textContent = 'B 촬영 중 (줌 3배로 바뀝니다)...';
+      await track.applyConstraints({ advanced: [{ zoom: 3 }] });
+      await sleep(1500);   // 줌·초점이 자리잡을 시간
+      report.zoomApplied = track.getSettings().zoom;
+      img = await loadImage(await ic.takePhoto(photoSettings));
+      [sx, sy, sw, sh] = crop34(img.naturalWidth, img.naturalHeight, 1);
+      results.B = { ...(await toBlobUrl(img, sx, sy, sw, sh)), sharp: sharpness(img, sx, sy, sw, sh), note: `적용된 줌 ${report.zoomApplied}배` };
+      await track.applyConstraints({ advanced: [{ zoom: 1 }] });
+    } else {
+      results.B = { note: '이 브라우저는 카메라 줌 기능이 없음' };
+    }
+    $('status').textContent = 'A·B 완료. 이제 아래 C(삼성 카메라)를 찍어 주세요.';
+  } catch (e) {
+    $('status').innerHTML = `<span class="bad">오류: ${e.name} ${e.message}</span>`;
+  }
+  $('btnAB').disabled = false;
+  render();
+};
+
+$('fileC').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = await loadImage(f);
+  const [sx, sy, sw, sh] = crop34(img.naturalWidth, img.naturalHeight, 1);
+  results.C = { url: img.src, w: Math.round(sw), h: Math.round(sh), kb: Math.round(f.size / 1024),
+    sharp: sharpness(img, sx, sy, sw, sh), note: `원본 ${img.naturalWidth}×${img.naturalHeight}` };
+  render();
+};
+
+function render() {
+  const names = { A: 'A. 지금 방식 (잘라내기)', B: 'B. 웹 카메라 줌', C: 'C. 삼성 카메라 앱' };
+  const max = Math.max(...Object.values(results).map(r => r.sharp || 0), 1);
+  let html = `<div class="card"><h2>결과 (3:4로 맞춘 크기 · 선명도)</h2><table>
+    <tr><th>방법</th><th>크기</th><th>선명도</th></tr>`;
+  for (const k of ['A', 'B', 'C']) {
+    const r = results[k];
+    if (!r) { html += `<tr><td>${names[k]}</td><td class="dim" colspan="2">아직 안 찍음</td></tr>`; continue; }
+    html += `<tr><td>${names[k]}<div class="dim">${r.note || ''}</div></td>
+      <td>${r.w ? `${r.w}×${r.h}<div class="dim">${mp(r.w, r.h)}</div>` : '-'}</td>
+      <td>${r.sharp ?? '-'}${r.sharp ? `<div class="bar" style="width:${Math.round(r.sharp / max * 100)}%"></div>` : ''}</td></tr>`;
+  }
+  html += `</table><div class="dim" style="margin-top:8px">선명도는 같은 크기로 맞춘 뒤 비교한 값입니다. 같은 부품·같은 거리일 때만 비교가 의미 있습니다.</div></div>`;
+  for (const k of ['A', 'B', 'C']) {
+    const r = results[k]; if (!r?.url) continue;
+    html += `<div class="card shot"><h2>${names[k]}</h2><a href="${r.url}" target="_blank">원본 크기로 열기 (확대해서 보기)</a><img src="${r.url}"/></div>`;
+  }
+  $('out').innerHTML = html;
+  $('btnCopy').style.display = 'flex';
+}
+
+$('btnCopy').onclick = async () => {
+  const lines = ['[3배 줌 비교 결과]', ...Object.entries(report).map(([k, v]) => `${k}: ${v}`)];
+  for (const k of ['A', 'B', 'C']) {
+    const r = results[k];
+    lines.push(r ? `${k}: ${r.w ?? '-'}x${r.h ?? '-'}, 선명도 ${r.sharp ?? '-'}, ${r.kb ?? '-'}KB, ${r.note ?? ''}` : `${k}: 안 찍음`);
+  }
+  const text = lines.join('\n');
+  try { await navigator.clipboard.writeText(text); $('btnCopy').textContent = '복사됨!'; }
+  catch { prompt('아래 내용을 복사하세요', text); }
+};
+</script>
+</body>
+</html>
