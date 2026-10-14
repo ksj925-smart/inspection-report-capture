@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>카메라 해상도 측정</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: #0B0C0E; color: #F5F5F7;
+    font-family: -apple-system, system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #9CA0AA; font-size: 12px; margin-bottom: 16px; }
+  button { width: 100%; height: 52px; border-radius: 12px; border: none; font-size: 15px;
+    font-weight: 700; background: #C8FF3D; color: #0B0C0E; margin-bottom: 8px; }
+  button.sec { background: #1C1F25; color: #F5F5F7; border: 1px solid #363A42; }
+  button:disabled { opacity: .4; }
+  video { width: 100%; border-radius: 12px; background: #000; display: block; margin-bottom: 12px; }
+  .card { background: #15171B; border: 1px solid #26292F; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; color: #C8FF3D; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { padding: 6px 4px; border-bottom: 1px solid #26292F; text-align: left; }
+  th { color: #9CA0AA; font-weight: 500; }
+  .big { font-size: 22px; font-weight: 800; }
+  .ok { color: #C8FF3D; } .bad { color: #FF5A47; } .dim { color: #9CA0AA; }
+  .cmp { display: flex; gap: 8px; }
+  .cmp div { flex: 1; min-width: 0; }
+  .cmp canvas { width: 100%; image-rendering: pixelated; border-radius: 8px; background: #000; display: block; }
+  .cmp p { margin: 4px 0 0; font-size: 12px; color: #9CA0AA; text-align: center; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; color: #9CA0AA; margin: 0; }
+</style>
+</head>
+<body>
+<h1>카메라 해상도 측정</h1>
+<div class="sub">지금 앱 방식(동영상 캡처)과 사진 촬영 방식의 화질을 이 폰에서 직접 비교합니다.<br/>폰을 <b>세로</b>로 들고, 글씨가 있는 물체를 30cm 거리에서 비춘 뒤 측정을 누르세요.</div>
+
+<button id="btnStart">1. 카메라 켜기</button>
+<video id="v" playsinline muted autoplay></video>
+<button id="btnMeasure" disabled>2. 측정하기 (1~3초)</button>
+
+<div id="out"></div>
+<button id="btnCopy" class="sec" style="display:none">결과 복사하기 (Claude에게 붙여넣기)</button>
+
+<script>
+const $ = id => document.getElementById(id);
+const RATIOS = [
+  ['외륜·내륜', 3, 4], ['케이지', 8, 3], ['볼', 4, 3], ['JOINT·CLAMP', 9, 16],
+];
+let stream = null, track = null, report = {};
+
+const mp = (w, h) => (w * h / 1e6).toFixed(1) + 'MP';
+function cropSize(w, h, rw, rh) {
+  return (w / h > rw / rh) ? [Math.round(h * rw / rh), h] : [w, Math.round(w * rh / rw)];
+}
+
+$('btnStart').onclick = async () => {
+  try {
+    // 지금 앱과 똑같은 요청 조건
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    track = stream.getVideoTracks()[0];
+    $('v').srcObject = stream;
+    await $('v').play();
+    $('btnMeasure').disabled = false;
+    $('btnStart').textContent = '카메라 켜짐';
+    $('btnStart').disabled = true;
+  } catch (e) {
+    $('out').innerHTML = `<div class="card bad">카메라를 켜지 못했습니다: ${e.message}</div>`;
+  }
+};
+
+function frameToCanvas(video) {
+  const c = document.createElement('canvas');
+  c.width = video.videoWidth; c.height = video.videoHeight;
+  c.getContext('2d').drawImage(video, 0, 0);
+  return c;
+}
+
+async function blobToCanvas(blob) {
+  const img = new Image();
+  img.src = URL.createObjectURL(blob);
+  await img.decode();           // EXIF 회전 반영된 크기
+  const c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return c;
+}
+
+// 같은 물체 부분(가운데 영역)을 같은 크기로 확대해서 비교
+function centerZoom(src, fraction) {
+  const side = Math.round(Math.min(src.width, src.height) * fraction);
+  const out = document.createElement('canvas');
+  out.width = side; out.height = side;
+  out.getContext('2d').drawImage(src, (src.width - side) / 2, (src.height - side) / 2, side, side, 0, 0, side, side);
+  return out;
+}
+
+$('btnMeasure').onclick = async () => {
+  $('btnMeasure').disabled = true;
+  $('btnMeasure').textContent = '측정 중...';
+  const r = report = { ua: navigator.userAgent, time: new Date().toISOString() };
+  const v = $('v');
+
+  // A. 지금 앱 방식
+  r.videoW = v.videoWidth; r.videoH = v.videoHeight;
+  const frame = frameToCanvas(v);
+
+  // 카메라 정보
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  r.maxStreamW = caps.width?.max; r.maxStreamH = caps.height?.max;
+  r.zoom = caps.zoom ? `${caps.zoom.min}~${caps.zoom.max}` : '지원 안 함';
+  r.focus = caps.focusMode ? caps.focusMode.join(',') : '정보 없음';
+  r.torch = caps.torch ? '지원' : '지원 안 함';
+
+  // B. 사진 촬영 방식 (ImageCapture.takePhoto)
+  let photo = null;
+  r.imageCapture = 'ImageCapture' in window ? '지원' : '지원 안 함';
+  if ('ImageCapture' in window) {
+    try {
+      const ic = new ImageCapture(track);
+      const pc = await ic.getPhotoCapabilities();
+      r.photoMaxW = pc.imageWidth?.max; r.photoMaxH = pc.imageHeight?.max;
+      const t0 = performance.now();
+      const settings = (pc.imageWidth?.max) ? { imageWidth: pc.imageWidth.max, imageHeight: pc.imageHeight.max } : {};
+      const blob = await ic.takePhoto(settings);
+      r.photoMs = Math.round(performance.now() - t0);
+      r.photoKB = Math.round(blob.size / 1024);
+      photo = await blobToCanvas(blob);
+      r.photoW = photo.width; r.photoH = photo.height;
+    } catch (e) {
+      r.photoError = e.name + ': ' + e.message;
+    }
+  }
+  render(frame, photo);
+  $('btnMeasure').disabled = false;
+  $('btnMeasure').textContent = '2. 다시 측정하기';
+};
+
+function render(frame, photo) {
+  const r = report;
+  const times = photo ? (r.photoW * r.photoH) / (r.videoW * r.videoH) : 0;
+  let html = `
+  <div class="card">
+    <h2>결론</h2>
+    <table>
+      <tr><th>지금 앱 (동영상 캡처)</th><td class="big bad">${mp(r.videoW, r.videoH)}</td></tr>
+      <tr><th>사진 촬영 방식</th><td class="big ${photo ? 'ok' : 'bad'}">${photo ? mp(r.photoW, r.photoH) : '사용 불가'}</td></tr>
+    </table>
+    ${photo ? `<p>사진 방식이 화소 수 <b class="ok">${times.toFixed(1)}배</b>. 촬영 시간 ${(r.photoMs / 1000).toFixed(1)}초, 파일 ${(r.photoKB / 1024).toFixed(1)}MB</p>`
+            : `<p class="bad">${r.photoError || '이 브라우저는 사진 촬영 기능이 없습니다'}</p>`}
+  </div>`;
+
+  html += `<div class="card"><h2>부품별 실제 저장 크기 (줌 1배)</h2>
+    <table><tr><th>부품</th><th>지금</th><th>사진 방식</th></tr>`;
+  for (const [name, rw, rh] of RATIOS) {
+    const [aw, ah] = cropSize(r.videoW, r.videoH, rw, rh);
+    let b = '-';
+    if (photo) { const [bw, bh] = cropSize(r.photoW, r.photoH, rw, rh); b = `${bw}×${bh}<br/><span class="ok">${mp(bw, bh)}</span>`; }
+    html += `<tr><td>${name}</td><td>${aw}×${ah}<br/><span class="dim">${mp(aw, ah)}</span></td><td>${b}</td></tr>`;
+  }
+  html += `</table></div>`;
+
+  if (photo) {
+    html += `<div class="card"><h2>같은 부분 확대 비교 (가운데)</h2>
+      <div class="cmp"><div id="za"></div><div id="zb"></div></div></div>`;
+  }
+
+  html += `<div class="card"><h2>카메라 정보</h2><table>
+    <tr><th>동영상 최대 크기</th><td>${r.maxStreamW ?? '?'}×${r.maxStreamH ?? '?'}</td></tr>
+    <tr><th>사진 최대 크기</th><td>${r.photoMaxW ?? '?'}×${r.photoMaxH ?? '?'}</td></tr>
+    <tr><th>진짜 렌즈 줌</th><td>${r.zoom}</td></tr>
+    <tr><th>초점 모드</th><td>${r.focus}</td></tr>
+    <tr><th>플래시(손전등)</th><td>${r.torch}</td></tr>
+  </table></div>`;
+
+  $('out').innerHTML = html;
+  if (photo) {
+    const za = centerZoom(frame, 0.25), zb = centerZoom(photo, 0.25);
+    za.style.cssText = zb.style.cssText = '';
+    $('za').append(za); $('za').insertAdjacentHTML('beforeend', `<p>지금 앱<br/>${za.width}px</p>`);
+    $('zb').append(zb); $('zb').insertAdjacentHTML('beforeend', `<p>사진 방식<br/>${zb.width}px</p>`);
+  }
+  $('btnCopy').style.display = 'block';
+}
+
+$('btnCopy').onclick = async () => {
+  const text = '[카메라 측정 결과]\n' + Object.entries(report).map(([k, v]) => `${k}: ${v}`).join('\n');
+  try { await navigator.clipboard.writeText(text); $('btnCopy').textContent = '복사됨!'; }
+  catch { prompt('아래 내용을 복사하세요', text); }
+};
+</script>
+</body>
+</html>
