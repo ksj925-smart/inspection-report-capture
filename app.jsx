@@ -153,6 +153,9 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
   const shootingRef    = useRef(false);
   const [camReady, setCamReady] = useState(false);
   const [flash,    setFlash]    = useState(false);
+  const [hdReady,  setHdReady]  = useState(false);   // 고화질 사진 촬영 가능 여부
+  const [shooting, setShooting] = useState(false);   // 사진 촬영 진행 중 (움직이면 흔들림)
+  const [lastShot, setLastShot] = useState(null);    // 직전 촬영 결과 { hd, size, err }
   const [camError, setCamError] = useState(null);
   const [zoomLevel, setZoomLevel] = useState(defaultZoom);
 
@@ -177,6 +180,7 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
             const pc = await ic.getPhotoCapabilities();
             imageCapRef.current = { ic,
               settings: pc.imageWidth?.max ? { imageWidth:pc.imageWidth.max, imageHeight:pc.imageHeight.max } : {} };
+            setHdReady(true);
           } catch(e) { imageCapRef.current = null; }
         }
         if (videoRef.current) {
@@ -220,9 +224,9 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
   }, []);
   const handleTouchEnd = useCallback(() => { lastPinchDist.current=null; }, []);
 
-  // 고화질 사진 촬영 (ImageCapture.takePhoto) — 실패하면 null
+  // 고화질 사진 촬영 (ImageCapture.takePhoto) — 실패하면 { err }
   const takeHighResPhoto = async () => {
-    if (!imageCapRef.current) return null;
+    if (!imageCapRef.current) return { err:'미지원 브라우저' };
     try {
       const { ic, settings } = imageCapRef.current;
       const blob = await ic.takePhoto(settings);
@@ -230,15 +234,15 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
       img.src = URL.createObjectURL(blob);
       await img.decode();   // EXIF 회전이 반영된 크기
       URL.revokeObjectURL(img.src);
-      return img;
-    } catch(e) { return null; }
+      return { img };
+    } catch(e) { return { err:e.name || '촬영 실패' }; }
   };
 
   // 셔터 (고화질 사진 → 미리보기 범위 맞춤 → 비율 크롭 + 소프트웨어 줌)
   const handleShutter = useCallback(async () => {
     if (!videoRef.current || !camReady || shootingRef.current) return;
     shootingRef.current = true;
-    setFlash(true); setTimeout(()=>setFlash(false), 120);
+    setShooting(true);
     try {
       const video = videoRef.current;
       const vw = video.videoWidth  || 1280;
@@ -247,8 +251,11 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
 
       // 0. 촬영 원본: 고화질 사진, 안 되면 기존처럼 동영상 프레임
       let source = video, baseX = 0, baseY = 0, baseW = vw, baseH = vh;
-      const photo = await takeHighResPhoto();
-      if (photo && (photo.naturalWidth > photo.naturalHeight) === (vw > vh)) {
+      const { img:photo, err } = await takeHighResPhoto();
+      setFlash(true); setTimeout(()=>setFlash(false), 120);   // 실제 촬영 완료 시점에 플래시
+      let fallbackErr = err;
+      if (photo && (photo.naturalWidth > photo.naturalHeight) !== (vw > vh)) fallbackErr = '사진 방향 불일치';
+      else if (photo) {
         // 사진은 미리보기(동영상)보다 넓게 찍히므로, 미리보기와 같은 범위로 먼저 맞춤
         const pw = photo.naturalWidth, ph = photo.naturalHeight;
         source = photo;
@@ -276,9 +283,11 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
       canvas.height = Math.round(srcH);
       canvas.getContext('2d').drawImage(source, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
       const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+      setLastShot({ hd: source !== video, size:`${canvas.width}×${canvas.height}`, err: source !== video ? null : fallbackErr });
       onCapture(blob, URL.createObjectURL(blob));
     } finally {
       shootingRef.current = false;
+      setShooting(false);
     }
   }, [camReady, onCapture, product.id, zoomLevel]);
 
@@ -303,6 +312,26 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
         <video ref={videoRef} id="camera-stream" playsInline muted autoPlay
           style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>
         {flash && <div style={{position:'absolute',inset:0,background:'white',opacity:0.7,pointerEvents:'none'}}/>}
+
+        {/* 화질 표시 — 고화질(HD) 사진인지, 일반 화질(동영상 캡처)로 찍혔는지 */}
+        {camReady && (
+          <div style={{position:'absolute',top:56,left:12,zIndex:5,pointerEvents:'none',
+            background:'rgba(0,0,0,0.6)',borderRadius:8,padding:'4px 8px',
+            fontFamily:FONT_MONO,fontSize:10,lineHeight:1.5,
+            color: (lastShot ? lastShot.hd : hdReady) ? C.accent : C.danger}}>
+            {(lastShot ? lastShot.hd : hdReady) ? 'HD 사진' : '일반 화질'}
+            {lastShot && <div style={{color:C.dim}}>{lastShot.size}{lastShot.err ? ` · ${lastShot.err}` : ''}</div>}
+          </div>
+        )}
+
+        {/* 촬영 중 — 사진이 저장될 때까지 움직이지 않도록 안내 */}
+        {shooting && (
+          <div style={{position:'absolute',inset:0,zIndex:6,display:'flex',alignItems:'center',justifyContent:'center',pointerEvents:'none'}}>
+            <div style={{background:'rgba(0,0,0,0.7)',borderRadius:12,padding:'10px 18px',fontSize:14,fontWeight:700,color:C.accent}}>
+              촬영 중 · 움직이지 마세요
+            </div>
+          </div>
+        )}
 
         {/* 가이드 프레임 — CSS aspect-ratio 방식 (SVG stretch 문제 해결) */}
         <div style={{position:'absolute',inset:0,pointerEvents:'none'}}>
