@@ -182,6 +182,16 @@ const TOKEN_KEY = 'jr_token';
 const saveToken = (token, expiresIn) => {
   try { localStorage.setItem(TOKEN_KEY, JSON.stringify({ token, exp: Date.now() + (expiresIn - 60) * 1000 })); } catch(e) {}
 };
+// 구글 로그인 페이지로 이동 (돌아오면 저장된 사진은 자동 복원됨)
+const startGoogleLogin = () => {
+  try { localStorage.removeItem(TOKEN_KEY); } catch(e) {}
+  const redirectUri = window.location.origin + window.location.pathname;
+  const params = new URLSearchParams({ client_id:GOOGLE_CLIENT_ID, redirect_uri:redirectUri, response_type:'token', scope:GOOGLE_DRIVE_SCOPE, prompt:'select_account' });
+  window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
+};
+// 로그인 만료로 인한 실패인지
+const isAuthError = (msg) => /invalid authentication|invalid credentials|unauthenticated|invalid_token|login required/i.test(msg || '');
+
 const loadToken = () => {
   try { const t = JSON.parse(localStorage.getItem(TOKEN_KEY)); return t && t.exp > Date.now() ? t.token : null; } catch(e) { return null; }
 };
@@ -923,9 +933,7 @@ function LoginScreen({ onLogin }) {
   const [error, setError] = useState(null);
   const handleGoogleLogin = () => {
     if (!GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID.includes('YOUR_CLIENT_ID')) { setError('Google Client ID가 설정되지 않았습니다.'); return; }
-    const redirectUri = window.location.origin + window.location.pathname;
-    const params = new URLSearchParams({ client_id:GOOGLE_CLIENT_ID, redirect_uri:redirectUri, response_type:'token', scope:GOOGLE_DRIVE_SCOPE, prompt:'select_account' });
-    window.location.href = 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
+    startGoogleLogin();
   };
   return (
     <div style={{height:'100%',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',background:C.bg,padding:32}}>
@@ -998,6 +1006,7 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
   };
 
   const startUpload = async () => {
+    if (!loadToken()) { setPhase('auth'); return; }   // 로그인 만료 → 다시 로그인 안내
     setPhase('uploading');
     try {
       const hansaeId = await findOrCreateHansae();
@@ -1030,7 +1039,7 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
 
       setDriveLink(`https://drive.google.com/drive/folders/${rootId}`);
       setPhase('done');
-    } catch(err) { setErrorMsg(err.message); setPhase('error'); }
+    } catch(err) { setErrorMsg(err.message); setPhase(isAuthError(err.message) ? 'auth' : 'error'); }
   };
 
   // 사이드별 사진 수
@@ -1138,6 +1147,22 @@ function UploadModal({ capturedData, selectedSides, segments, accessToken, onClo
           </div>
         )}
 
+        {/* ── 로그인 만료 ── */}
+        {phase==='auth' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{fontSize:40,marginBottom:16}}>🔑</div>
+            <div style={{fontSize:16,fontWeight:700,color:C.amber,marginBottom:8}}>로그인이 만료되었습니다</div>
+            <div style={{fontSize:12,color:C.dim,marginBottom:20,lineHeight:1.6}}>
+              구글 로그인은 1시간 후 만료됩니다.<br/>
+              찍은 사진은 그대로 보관되어 있으니, 다시 로그인한 뒤<br/>업로드를 한 번 더 눌러 주세요.
+            </div>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={onClose} style={{flex:1,height:44,borderRadius:10,background:'none',border:`1px solid ${C.border}`,color:C.text,cursor:'pointer'}}>닫기</button>
+              <button onClick={startGoogleLogin} style={{flex:2,height:44,borderRadius:10,background:C.accent,color:C.bg,border:'none',cursor:'pointer',fontWeight:700}}>다시 로그인</button>
+            </div>
+          </div>
+        )}
+
         {/* ── 오류 ── */}
         {phase==='error' && (
           <div style={{textAlign:'center',padding:'8px 0'}}>
@@ -1201,6 +1226,7 @@ function VisualUploadModal({ visualData, accessToken, onClose, onDone }) {
     s + VISUAL_ITEMS.filter(it => visualData[side][it.id]).length, 0);
 
   const startUpload = async () => {
+    if (!loadToken()) { setPhase('auth'); return; }   // 로그인 만료 → 다시 로그인 안내
     setPhase('uploading');
     try {
       const hansaeId  = await findOrCreateHansae();
@@ -1229,7 +1255,7 @@ function VisualUploadModal({ visualData, accessToken, onClose, onDone }) {
 
       setDriveLink(`https://drive.google.com/drive/folders/${rootId}`);
       setPhase('done');
-    } catch(err) { setErrorMsg(err.message); setPhase('error'); }
+    } catch(err) { setErrorMsg(err.message); setPhase(isAuthError(err.message) ? 'auth' : 'error'); }
   };
 
   const canClose = phase==='confirm'||phase==='done'||phase==='error';
@@ -1321,6 +1347,22 @@ function VisualUploadModal({ visualData, accessToken, onClose, onDone }) {
                 Drive에서 열기
               </a>
               <button onClick={onDone} style={{height:44,borderRadius:12,background:'none',border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>확인</button>
+            </div>
+          </div>
+        )}
+
+        {/* ── 로그인 만료 ── */}
+        {phase==='auth' && (
+          <div style={{textAlign:'center',padding:'8px 0'}}>
+            <div style={{fontSize:40,marginBottom:16}}>🔑</div>
+            <div style={{fontSize:16,fontWeight:700,color:C.amber,marginBottom:8}}>로그인이 만료되었습니다</div>
+            <div style={{fontSize:12,color:C.dim,marginBottom:20,lineHeight:1.6}}>
+              구글 로그인은 1시간 후 만료됩니다.<br/>
+              찍은 사진은 그대로 보관되어 있으니, 다시 로그인한 뒤<br/>업로드를 한 번 더 눌러 주세요.
+            </div>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={onClose} style={{flex:1,height:44,borderRadius:10,background:'none',border:`1px solid ${C.border}`,color:C.text,cursor:'pointer'}}>닫기</button>
+              <button onClick={startGoogleLogin} style={{flex:2,height:44,borderRadius:10,background:C.accent,color:C.bg,border:'none',cursor:'pointer',fontWeight:700}}>다시 로그인</button>
             </div>
           </div>
         )}
