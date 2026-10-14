@@ -142,6 +142,50 @@ function ProductCard({ product, segments, status, count, onTap, disabled }) {
   );
 }
 
+// ─── 미리보기용 작은 사진 (원본을 화면에 띄우면 메모리를 많이 써서 브라우저가 꺼질 수 있음)
+function makeThumb(canvas) {
+  const k = Math.min(1, 480 / Math.max(canvas.width, canvas.height));
+  const t = document.createElement('canvas');
+  t.width = Math.round(canvas.width * k); t.height = Math.round(canvas.height * k);
+  t.getContext('2d').drawImage(canvas, 0, 0, t.width, t.height);
+  return new Promise(res => t.toBlob(res, 'image/jpeg', 0.8));
+}
+
+// ─── 촬영 데이터 보관 (IndexedDB) ─────────────────────────────
+// 카메라 앱이 열린 동안 폰이 브라우저 페이지를 닫아도, 찍은 사진과 진행 상황을 되살리기 위함
+const idb = (() => {
+  let dbp = null;
+  const open = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open('joint-report', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => res(r.result);
+    r.onerror   = () => rej(r.error);
+  }));
+  const run = (mode, fn) => open().then(db => new Promise((res, rej) => {
+    const tx  = db.transaction('kv', mode);
+    const req = fn(tx.objectStore('kv'));
+    tx.oncomplete = () => res(req ? req.result : undefined);
+    tx.onerror    = () => rej(tx.error);
+  }));
+  return {
+    get:  k      => run('readonly',  st => st.get(k)),
+    set:  (k, v) => run('readwrite', st => st.put(v, k)),
+    keys: ()     => run('readonly',  st => st.getAllKeys()),
+    del:  ks     => run('readwrite', st => { ks.forEach(k => st.delete(k)); }),
+  };
+})();
+const newShotId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const saveShot  = (id, blob, thumb) => idb.set(`img:${id}`, { blob, thumb }).catch(() => {});
+
+// 로그인 유지 (Google 토큰 유효시간 동안)
+const TOKEN_KEY = 'jr_token';
+const saveToken = (token, expiresIn) => {
+  try { localStorage.setItem(TOKEN_KEY, JSON.stringify({ token, exp: Date.now() + (expiresIn - 60) * 1000 })); } catch(e) {}
+};
+const loadToken = () => {
+  try { const t = JSON.parse(localStorage.getItem(TOKEN_KEY)); return t && t.exp > Date.now() ? t.token : null; } catch(e) { return null; }
+};
+
 // ─── 가이드 박스 모서리 표시 (SVG) ────────────────────────────
 function GuideCorners() {
   const hl = 12; // 코너 마크 길이 (viewBox 100 기준 %)
@@ -347,10 +391,13 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
       canvas.width  = Math.round(rect.w);
       canvas.height = Math.round(rect.h);
       canvas.getContext('2d').drawImage(p.img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
-      onCapture(blob, URL.createObjectURL(blob));
+      const blob  = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+      const thumb = await makeThumb(canvas);
+      canvas.width = canvas.height = 0;   // 큰 이미지 메모리 즉시 반환
+      onCapture(blob, thumb);
     } finally {
       URL.revokeObjectURL(p.url);
+      p.img.src = '';
       setPhoto(cur => cur === p ? null : cur);
       setSaving(false);
     }
@@ -492,6 +539,384 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
     </div>
   );
 }
+
+// ─── LiveCameraScreen (Visual 촬영용) ─────────────────────────
+// 앱 화면 안에서 미리보기를 보며 촬영 (고화질 사진 기능 사용, 안 되면 동영상 캡처)
+function LiveCameraScreen({ product, segments, shotIndex, totalShots, paused,
+    onCapture, onStop, onResume, capturedImages, defaultZoom=1.0, onZoomChange }) {
+
+  const videoRef       = useRef(null);
+  const streamRef      = useRef(null);
+  const lastPinchDist  = useRef(null);
+  const imageCapRef    = useRef(null);
+  const shootingRef    = useRef(false);
+  const [camReady, setCamReady] = useState(false);
+  const [flash,    setFlash]    = useState(false);
+  const [hdReady,  setHdReady]  = useState(false);   // 고화질 사진 촬영 가능 여부
+  const [shooting, setShooting] = useState(false);   // 사진 촬영 진행 중 (움직이면 흔들림)
+  const [lastShot, setLastShot] = useState(null);    // 직전 촬영 결과 { hd, size, err }
+  const [camError, setCamError] = useState(null);
+  const [zoomLevel, setZoomLevel] = useState(defaultZoom);
+
+  const isCage = product.id === 'cage';
+  const faceSide = isCage && shotIndex >= segments ? 'BACK' : 'FRONT';
+
+  // 카메라 시작
+  useEffect(() => {
+    let cancelled = false;
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1920 }, height:{ ideal:1080 } },
+          audio:false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t=>t.stop()); return; }
+        streamRef.current = stream;
+        // 고화질 사진 촬영 준비 (ImageCapture 미지원 기기는 기존 동영상 캡처로 동작)
+        if ('ImageCapture' in window) {
+          try {
+            const ic = new ImageCapture(stream.getVideoTracks()[0]);
+            const pc = await ic.getPhotoCapabilities();
+            imageCapRef.current = { ic,
+              settings: pc.imageWidth?.max ? { imageWidth:pc.imageWidth.max, imageHeight:pc.imageHeight.max } : {} };
+            setHdReady(true);
+          } catch(e) { imageCapRef.current = null; }
+        }
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play();
+          setCamReady(true);
+        }
+      } catch(err) { if (!cancelled) setCamError(err.message); }
+    }
+    startCamera();
+    return () => { cancelled=true; streamRef.current?.getTracks().forEach(t=>t.stop()); };
+  }, []);
+
+  // CSS 프리뷰 줌
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.style.transform      = `scale(${zoomLevel})`;
+      videoRef.current.style.transformOrigin = 'center';
+    }
+    onZoomChange?.(zoomLevel);
+  }, [zoomLevel]);
+
+  const clampZoom = (v) => Math.min(4, Math.max(0.5, +v.toFixed(2)));
+
+  // 핀치 줌
+  const handleTouchStart = useCallback((e) => {
+    if (e.touches.length===2) {
+      lastPinchDist.current = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+    }
+  }, []);
+  const handleTouchMove = useCallback((e) => {
+    if (e.touches.length===2 && lastPinchDist.current) {
+      const dist  = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+      const delta = dist / lastPinchDist.current;
+      setZoomLevel(prev => clampZoom(prev * delta));
+      lastPinchDist.current = dist;
+    }
+  }, []);
+  const handleTouchEnd = useCallback(() => { lastPinchDist.current=null; }, []);
+
+  // 고화질 사진 촬영 (ImageCapture.takePhoto) — 실패하면 { err }
+  const takeHighResPhoto = async () => {
+    if (!imageCapRef.current) return { err:'미지원 브라우저' };
+    try {
+      const { ic, settings } = imageCapRef.current;
+      const blob = await ic.takePhoto(settings);
+      const img  = new Image();
+      img.src = URL.createObjectURL(blob);
+      await img.decode();   // EXIF 회전이 반영된 크기
+      URL.revokeObjectURL(img.src);
+      return { img };
+    } catch(e) { return { err:e.name || '촬영 실패' }; }
+  };
+
+  // 셔터 (고화질 사진 → 미리보기 범위 맞춤 → 비율 크롭 + 소프트웨어 줌)
+  const handleShutter = useCallback(async () => {
+    if (!videoRef.current || !camReady || shootingRef.current) return;
+    shootingRef.current = true;
+    setShooting(true);
+    try {
+      const video = videoRef.current;
+      const vw = video.videoWidth  || 1280;
+      const vh = video.videoHeight || 720;
+      const [rw, rh] = CROP_RATIO[product.id] || [4, 3];
+
+      // 0. 촬영 원본: 고화질 사진, 안 되면 기존처럼 동영상 프레임
+      let source = video, baseX = 0, baseY = 0, baseW = vw, baseH = vh;
+      const { img:photo, err } = await takeHighResPhoto();
+      setFlash(true); setTimeout(()=>setFlash(false), 120);   // 실제 촬영 완료 시점에 플래시
+      let fallbackErr = err;
+      if (photo && (photo.naturalWidth > photo.naturalHeight) !== (vw > vh)) fallbackErr = '사진 방향 불일치';
+      else if (photo) {
+        // 사진은 미리보기(동영상)보다 넓게 찍히므로, 미리보기와 같은 범위로 먼저 맞춤
+        const pw = photo.naturalWidth, ph = photo.naturalHeight;
+        source = photo;
+        if (pw/ph > vw/vh) { baseH=ph; baseW=ph*vw/vh; baseX=(pw-baseW)/2; }
+        else               { baseW=pw; baseH=pw*vh/vw; baseY=(ph-baseH)/2; }
+      }
+
+      // 1. 비율 크롭
+      let srcX, srcY, srcW, srcH;
+      if (baseW/baseH > rw/rh) {
+        srcH=baseH; srcW=baseH*rw/rh; srcX=baseX+(baseW-srcW)/2; srcY=baseY;
+      } else {
+        srcW=baseW; srcH=baseW*rh/rw; srcX=baseX; srcY=baseY+(baseH-srcH)/2;
+      }
+
+      // 2. 소프트웨어 줌 (중심 기준 축소)
+      if (zoomLevel !== 1) {
+        const zw=srcW/zoomLevel, zh=srcH/zoomLevel;
+        srcX += (srcW-zw)/2; srcY += (srcH-zh)/2;
+        srcW=zw; srcH=zh;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width  = Math.round(srcW);
+      canvas.height = Math.round(srcH);
+      canvas.getContext('2d').drawImage(source, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
+      setLastShot({ hd: source !== video, size:`${canvas.width}×${canvas.height}`, err: source !== video ? null : fallbackErr });
+      onCapture(blob, await makeThumb(canvas));
+    } finally {
+      shootingRef.current = false;
+      setShooting(false);
+    }
+  }, [camReady, onCapture, product.id, zoomLevel]);
+
+  if (camError) return (
+    <div style={{position:'absolute',inset:0,zIndex:100,background:C.bg,
+      display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:24,gap:16}}>
+      <div style={{fontSize:40}}>📷</div>
+      <div style={{fontSize:16,fontWeight:700,color:C.text}}>카메라 접근 필요</div>
+      <div style={{fontSize:13,color:C.dim,textAlign:'center',lineHeight:1.6}}>브라우저에서 카메라 권한을 허용해 주세요.</div>
+      <div style={{fontFamily:FONT_MONO,fontSize:11,color:C.danger,padding:'8px 12px',background:`${C.danger}15`,borderRadius:8}}>{camError}</div>
+      <button onClick={onStop} style={{height:48,padding:'0 24px',borderRadius:12,
+        background:C.surface,border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:600,cursor:'pointer'}}>돌아가기</button>
+    </div>
+  );
+
+  return (
+    <div style={{position:'absolute',inset:0,zIndex:100,background:'#000',display:'flex',flexDirection:'column'}}
+      onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
+
+      {/* 뷰파인더 */}
+      <div style={{position:'relative',flex:1,overflow:'hidden'}}>
+        <video ref={videoRef} id="camera-stream" playsInline muted autoPlay
+          style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>
+        {flash && <div style={{position:'absolute',inset:0,background:'white',opacity:0.7,pointerEvents:'none'}}/>}
+
+        {/* 화질 표시 — 고화질(HD) 사진인지, 일반 화질(동영상 캡처)로 찍혔는지 */}
+        {camReady && (
+          <div style={{position:'absolute',top:56,left:12,zIndex:5,pointerEvents:'none',
+            background:'rgba(0,0,0,0.6)',borderRadius:8,padding:'4px 8px',
+            fontFamily:FONT_MONO,fontSize:10,lineHeight:1.5,
+            color: (lastShot ? lastShot.hd : hdReady) ? C.accent : C.danger}}>
+            {(lastShot ? lastShot.hd : hdReady) ? 'HD 사진' : '일반 화질'}
+            {lastShot && <div style={{color:C.dim}}>{lastShot.size}{lastShot.err ? ` · ${lastShot.err}` : ''}</div>}
+          </div>
+        )}
+
+        {/* 촬영 중 — 사진이 저장될 때까지 움직이지 않도록 안내 */}
+        {shooting && (
+          <div style={{position:'absolute',inset:0,zIndex:6,display:'flex',alignItems:'center',justifyContent:'center',pointerEvents:'none'}}>
+            <div style={{background:'rgba(0,0,0,0.7)',borderRadius:12,padding:'10px 18px',fontSize:14,fontWeight:700,color:C.accent}}>
+              촬영 중 · 움직이지 마세요
+            </div>
+          </div>
+        )}
+
+        {/* 가이드 프레임 — CSS aspect-ratio 방식 (SVG stretch 문제 해결) */}
+        <div style={{position:'absolute',inset:0,pointerEvents:'none'}}>
+          {/* 어두운 오버레이 + 가이드 박스 */}
+          <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            {(()=>{
+              const boxStyle = getGuideBoxStyle(product.id);
+              const hl = 12; // 코너 마크 길이 (viewBox 100 기준 %)
+              return (
+                <div style={{
+                  ...boxStyle,
+                  position:'relative',
+                  flexShrink:0,
+                  // 가이드 박스 외부를 어둡게 (overflow:hidden 부모에서 클리핑됨)
+                  boxShadow:'0 0 0 9999px rgba(0,0,0,0.38)',
+                }}>
+                  {/* 테두리 + 코너 마크 SVG (박스 내부라 비율 정확) */}
+                  <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
+                    <rect x="0.5" y="0.5" width="99" height="99" rx="1"
+                      fill="none" stroke={`${C.accent}55`} strokeWidth="0.7" strokeDasharray="3 2.5"/>
+                    {[{px:0,py:0,dx:1,dy:1},{px:100,py:0,dx:-1,dy:1},{px:0,py:100,dx:1,dy:-1},{px:100,py:100,dx:-1,dy:-1}].map(({px,py,dx,dy},i)=>(
+                      <g key={i} stroke={C.accent} strokeWidth="2" strokeLinecap="round">
+                        <line x1={px} y1={py} x2={px+dx*hl} y2={py}/>
+                        <line x1={px} y1={py} x2={px} y2={py+dy*hl}/>
+                      </g>
+                    ))}
+                    <line x1="50" y1="47" x2="50" y2="53" stroke={`${C.accent}80`} strokeWidth="0.6"/>
+                    <line x1="47" y1="50" x2="53" y2="50" stroke={`${C.accent}80`} strokeWidth="0.6"/>
+                  </svg>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* 상단 HUD */}
+          <div style={{position:'absolute',top:14,left:0,right:0,display:'flex',justifyContent:'center'}}>
+            <div style={{background:'rgba(0,0,0,0.6)',backdropFilter:'blur(8px)',
+              border:`1px solid ${C.border}`,borderRadius:20,padding:'6px 16px',
+              display:'flex',alignItems:'center',gap:10}}>
+              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>{Math.round(shotIndex*360/totalShots)}°</div>
+              <div style={{width:1,height:12,background:C.border}}/>
+              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.accent}}>
+                {product.name}{isCage && ` · ${faceSide}`}
+              </div>
+              <div style={{width:1,height:12,background:C.border}}/>
+              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>{shotIndex+1}/{totalShots}</div>
+              <div style={{width:1,height:12,background:C.border}}/>
+              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.amber}}>{zoomLevel.toFixed(1)}×</div>
+            </div>
+          </div>
+
+          {/* 로딩 */}
+          {!camReady && (
+            <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
+              <div style={{background:'rgba(0,0,0,0.7)',borderRadius:12,padding:'16px 24px',display:'flex',alignItems:'center',gap:10}}>
+                <div style={{width:16,height:16,border:`2px solid ${C.accent}`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
+                <span style={{fontSize:13,color:C.text}}>카메라 준비 중...</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 최근 촬영 미리보기 (좌측) */}
+        <div style={{position:'absolute',left:10,bottom:10,display:'flex',flexDirection:'column',gap:4}}>
+          {capturedImages.slice(-4).map((url,i)=>(
+            <div key={i} style={{width:44,height:44,borderRadius:6,overflow:'hidden',border:`1px solid ${C.border}`,opacity:0.85}}>
+              <img src={url} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+            </div>
+          ))}
+        </div>
+
+        {/* 중단 버튼 */}
+        <button onClick={onStop} style={{position:'absolute',top:14,right:14,
+          background:'rgba(0,0,0,0.6)',backdropFilter:'blur(8px)',
+          border:`1px solid ${C.danger}`,color:C.danger,
+          padding:'6px 14px',borderRadius:18,fontSize:12,fontWeight:600,
+          fontFamily:FONT_SANS,cursor:'pointer'}}>중단</button>
+      </div>
+
+      {/* 줌 컨트롤 바 */}
+      <div style={{background:'rgba(0,0,0,0.88)',backdropFilter:'blur(12px)',
+        padding:'8px 16px',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+        {/* 프리셋 버튼 */}
+        {[0.5,1,1.5,2,3,4].map(z=>{
+          const active = Math.abs(zoomLevel-z)<0.05;
+          return (
+            <button key={z} onClick={()=>setZoomLevel(z)} style={{
+              background:active?C.accent:'rgba(255,255,255,0.12)',
+              color:active?C.bg:'rgba(255,255,255,0.8)',
+              border:'none',borderRadius:10,padding:'5px 9px',
+              fontSize:10,fontFamily:FONT_MONO,cursor:'pointer',fontWeight:active?700:400,
+            }}>{z}×</button>
+          );
+        })}
+        <div style={{width:1,height:18,background:'rgba(255,255,255,0.15)',margin:'0 2px'}}/>
+        <button onClick={()=>setZoomLevel(prev=>clampZoom(prev-0.1))} style={{
+          width:28,height:28,borderRadius:14,background:'rgba(255,255,255,0.12)',
+          border:'none',color:'#fff',fontSize:16,cursor:'pointer',
+          display:'flex',alignItems:'center',justifyContent:'center',lineHeight:1}}>−</button>
+        <span style={{fontFamily:FONT_MONO,fontSize:12,color:'#fff',minWidth:36,textAlign:'center'}}>
+          {zoomLevel.toFixed(1)}×
+        </span>
+        <button onClick={()=>setZoomLevel(prev=>clampZoom(prev+0.1))} style={{
+          width:28,height:28,borderRadius:14,background:'rgba(255,255,255,0.12)',
+          border:'none',color:'#fff',fontSize:16,cursor:'pointer',
+          display:'flex',alignItems:'center',justifyContent:'center',lineHeight:1}}>+</button>
+      </div>
+
+      {/* 셔터 바 */}
+      <div style={{background:'rgba(0,0,0,0.85)',backdropFilter:'blur(20px)',
+        padding:'16px 24px',paddingBottom:'max(16px, env(safe-area-inset-bottom))',
+        display:'flex',alignItems:'center',justifyContent:'space-between',gap:16}}>
+        <div style={{flex:1}}>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
+            <span style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>진행</span>
+            <span style={{fontFamily:FONT_MONO,fontSize:10,color:C.accent}}>{shotIndex}/{totalShots}</span>
+          </div>
+          <div style={{height:3,background:C.surface,borderRadius:2}}>
+            <div style={{height:'100%',width:`${(shotIndex/totalShots)*100}%`,
+              background:C.accent,borderRadius:2,transition:'width 0.3s ease'}}/>
+          </div>
+        </div>
+        <button onClick={handleShutter} disabled={!camReady} style={{
+          width:72,height:72,borderRadius:36,flexShrink:0,
+          background:camReady?C.accent:C.dimmer,
+          border:'4px solid rgba(255,255,255,0.3)',
+          cursor:camReady?'pointer':'not-allowed',
+          display:'flex',alignItems:'center',justifyContent:'center',
+          boxShadow:camReady?`0 0 24px ${C.accent}60`:'none',
+        }}>
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+            <circle cx="14" cy="14" r="10" fill={C.bg}/>
+            <circle cx="14" cy="14" r="6" fill={C.bg} stroke={C.accent} strokeWidth="1.5"/>
+          </svg>
+        </button>
+        <div style={{flex:1,textAlign:'right'}}>
+          <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim,marginBottom:4}}>다음 각도</div>
+          <div style={{fontFamily:FONT_MONO,fontSize:14,color:C.text,fontWeight:600}}>
+            {Math.round((shotIndex+1)*360/totalShots)}°
+          </div>
+        </div>
+      </div>
+
+      {/* CAGE 뒤집기 모달 */}
+      {paused && (
+        <div style={{position:'absolute',inset:0,zIndex:110,
+          background:'rgba(11,12,14,0.94)',backdropFilter:'blur(10px)',
+          display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'0 28px'}}>
+          <div style={{width:110,height:110,borderRadius:55,background:C.surfaceHi,
+            border:`1px solid ${C.accent}`,display:'flex',alignItems:'center',justifyContent:'center',
+            marginBottom:22,boxShadow:`0 0 60px ${C.accent}30`}}>
+            <svg width="52" height="52" viewBox="0 0 56 56" fill="none">
+              <ellipse cx="28" cy="36" rx="18" ry="6" stroke={C.accent} strokeWidth="2"/>
+              <path d="M11 18 Q28 6 45 18" stroke={C.accent} strokeWidth="2" fill="none" strokeLinecap="round"/>
+              <path d="M45 18 L45 11 M45 18 L38 18" stroke={C.accent} strokeWidth="2" strokeLinecap="round"/>
+            </svg>
+          </div>
+          <div style={{fontSize:10,color:C.accent,fontFamily:FONT_MONO,letterSpacing:1.5,marginBottom:8,textAlign:'center'}}>
+            FLIP REQUIRED · 앞면 {segments}장 완료
+          </div>
+          <div style={{fontSize:22,fontWeight:700,color:C.text,letterSpacing:-0.3,marginBottom:10,textAlign:'center'}}>
+            제품을 뒤집어주세요
+          </div>
+          <div style={{fontSize:12,color:C.dim,lineHeight:1.55,textAlign:'center',marginBottom:28}}>
+            CAGE를 분리해 뒤집은 후 다시 올려주세요
+          </div>
+          <div style={{display:'flex',gap:8,width:'100%'}}>
+            <button onClick={onStop} style={{flex:1,height:48,borderRadius:12,
+              background:'none',border:`1px solid ${C.border}`,color:C.text,
+              fontSize:13,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>중단</button>
+            <button onClick={onResume} style={{flex:2,height:48,borderRadius:12,
+              background:C.accent,color:C.bg,fontSize:13,fontWeight:700,
+              fontFamily:FONT_SANS,cursor:'pointer',border:'none',
+              display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
+              뒤집었어요
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M5 3l5 5-5 5" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 // ─── LoginScreen ──────────────────────────────────────────────
 function LoginScreen({ onLogin }) {
@@ -932,7 +1357,7 @@ function Toast({ message, visible }) {
 // ─── 메인 앱 ─────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════
 function CaptureApp() {
-  const [accessToken,      setAccessToken]      = useState(null);
+  const [accessToken,      setAccessToken]      = useState(loadToken);
   const [appMode,          setAppMode]          = useState('360');   // '360' | 'visual'
   // ── 360° 상태 ────────────────────────────────────────────────
   const [selectedSides,    setSelectedSides]    = useState({ outboard:true, inboard:false });
@@ -962,12 +1387,74 @@ function CaptureApp() {
     if (!hash) return;
     const params = new URLSearchParams(hash.slice(1));
     const token  = params.get('access_token');
-    if (token) { setAccessToken(token); window.history.replaceState(null,'',window.location.pathname); }
+    if (token) {
+      saveToken(token, +params.get('expires_in') || 3600);
+      setAccessToken(token); window.history.replaceState(null,'',window.location.pathname);
+    }
   }, []);
 
   const showToast = useCallback((msg) => {
     setToast(msg); setTimeout(()=>setToast(null), 2500);
   }, []);
+
+  // ── 이전 촬영 복원 (브라우저가 페이지를 닫았다 다시 열어도 이어서 촬영) ──
+  const [restored, setRestored] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try {
+        const meta = await idb.get('meta');
+        if (meta) {
+          const load = async id => {
+            const r = id && await idb.get(`img:${id}`);
+            return r ? { id, blob:r.blob, url:URL.createObjectURL(r.thumb) } : null;
+          };
+          const cd = { outboard:emptyCapture(), inboard:emptyCapture() };
+          const vd = { outboard:emptyVisual(),  inboard:emptyVisual()  };
+          let total = 0;
+          for (const side of SIDES) {
+            for (const p of PRODUCTS) {
+              cd[side][p.id] = (await Promise.all((meta.captured?.[side]?.[p.id] || []).map(load))).filter(Boolean);
+              total += cd[side][p.id].length;
+            }
+            for (const it of VISUAL_ITEMS) {
+              vd[side][it.id] = await load(meta.visual?.[side]?.[it.id]);
+              if (vd[side][it.id]) total++;
+            }
+          }
+          setCapturedData(cd); setVisualData(vd);
+          if (meta.selectedSides) setSelectedSides(meta.selectedSides);
+          if (meta.segments)      setSegments(meta.segments);
+          if (meta.appMode)       setAppMode(meta.appMode);
+          // 촬영 도중이었다면 찍은 장수 다음부터 이어서
+          if (meta.activeId && cd[meta.activeSide]) {
+            setActiveSide(meta.activeSide); setActiveId(meta.activeId);
+            setShotIndex(cd[meta.activeSide][meta.activeId].length);
+            setFlipped(!!meta.flipped); setPaused(!!meta.paused);
+          }
+          if (total) showToast(`이전 촬영 ${total}장을 불러왔습니다`);
+        }
+      } catch(e) {}
+      setRestored(true);
+    })();
+  }, []);
+
+  // ── 진행 상황 자동 저장 + 더 이상 안 쓰는 사진 정리 ──
+  useEffect(() => {
+    if (!restored) return;
+    const meta = {
+      appMode, selectedSides, segments, activeId, activeSide, paused, flipped,
+      captured: Object.fromEntries(SIDES.map(s => [s, Object.fromEntries(PRODUCTS.map(p => [p.id, capturedData[s][p.id].map(x => x.id).filter(Boolean)]))])),
+      visual:   Object.fromEntries(SIDES.map(s => [s, Object.fromEntries(VISUAL_ITEMS.map(it => [it.id, visualData[s][it.id]?.id || null]))])),
+    };
+    idb.set('meta', meta).then(async () => {
+      const used = new Set([
+        ...SIDES.flatMap(s => Object.values(meta.captured[s]).flat()),
+        ...SIDES.flatMap(s => Object.values(meta.visual[s])).filter(Boolean),
+      ].map(id => `img:${id}`));
+      const stale = (await idb.keys()).filter(k => String(k).startsWith('img:') && !used.has(k));
+      if (stale.length) await idb.del(stale);
+    }).catch(() => {});
+  }, [restored, appMode, selectedSides, segments, activeId, activeSide, paused, flipped, capturedData, visualData]);
 
   // ── 진행 계산 ──────────────────────────────────────────────
   const progressBySide = useMemo(()=>{
@@ -989,11 +1476,14 @@ function CaptureApp() {
   const activeProd    = PRODUCTS.find(p=>p.id===activeId);
 
   // ── 셔터 콜백 ──────────────────────────────────────────────
-  const handleCapture = useCallback((blob,url)=>{
+  const handleCapture = useCallback((blob,thumb)=>{
+    const id  = newShotId();
+    const url = URL.createObjectURL(thumb);
+    saveShot(id, blob, thumb);
     const prod  = PRODUCTS.find(p=>p.id===activeId);
     const total = shotCount(prod, segments[activeSide]);
     const next  = shotIndex+1;
-    setCapturedData(prev=>({ ...prev, [activeSide]:{ ...prev[activeSide], [activeId]:[...prev[activeSide][activeId],{blob,url}] } }));
+    setCapturedData(prev=>({ ...prev, [activeSide]:{ ...prev[activeSide], [activeId]:[...prev[activeSide][activeId],{blob,url,id}] } }));
     if (activeId==='cage' && next===segments[activeSide] && !flipped) { setShotIndex(next); setPaused(true); return; }
     if (next>=total) { setShotIndex(0); setActiveId(null); setActiveSide(null); setFlipped(false); showToast(`${prod.name} 촬영 완료 · ${total}장`); return; }
     setShotIndex(next);
@@ -1036,9 +1526,12 @@ function CaptureApp() {
 
 
   // ── Visual 셔터 콜백 ───────────────────────────────────────
-  const handleVisualCapture = useCallback((blob, url) => {
+  const handleVisualCapture = useCallback((blob, thumb) => {
     const { side, itemId } = visualItem;
-    setVisualData(prev => ({ ...prev, [side]:{ ...prev[side], [itemId]:{ blob, url } } }));
+    const id  = newShotId();
+    const url = URL.createObjectURL(thumb);
+    saveShot(id, blob, thumb);
+    setVisualData(prev => ({ ...prev, [side]:{ ...prev[side], [itemId]:{ blob, url, id } } }));
     setVisualItem(null);
     showToast(`${VISUAL_ITEMS.find(x=>x.id===itemId)?.name} 촬영 완료`);
   }, [visualItem, showToast]);
@@ -1051,7 +1544,7 @@ function CaptureApp() {
     const vit = VISUAL_ITEMS.find(x=>x.id===visualItem.itemId);
     return (
       <div style={{height:'100%',position:'relative',background:'#000'}}>
-        <CameraScreen
+        <LiveCameraScreen
           product={{ id: vit?.ratioKey || 'ball', name:vit?.name||'' }}
           segments={1} shotIndex={0} totalShots={1} paused={false}
           capturedImages={[]}
