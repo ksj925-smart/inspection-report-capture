@@ -142,306 +142,277 @@ function ProductCard({ product, segments, status, count, onTap, disabled }) {
   );
 }
 
-// ─── CameraScreen ─────────────────────────────────────────────
-function CameraScreen({ product, segments, shotIndex, totalShots, paused,
-    onCapture, onStop, onResume, capturedImages, defaultZoom=1.0, onZoomChange }) {
+// ─── 가이드 박스 모서리 표시 (SVG) ────────────────────────────
+function GuideCorners() {
+  const hl = 12; // 코너 마크 길이 (viewBox 100 기준 %)
+  return (
+    <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
+      <rect x="0.5" y="0.5" width="99" height="99" rx="1"
+        fill="none" stroke={`${C.accent}55`} strokeWidth="0.7" strokeDasharray="3 2.5"/>
+      {[{px:0,py:0,dx:1,dy:1},{px:100,py:0,dx:-1,dy:1},{px:0,py:100,dx:1,dy:-1},{px:100,py:100,dx:-1,dy:-1}].map(({px,py,dx,dy},i)=>(
+        <g key={i} stroke={C.accent} strokeWidth="2" strokeLinecap="round">
+          <line x1={px} y1={py} x2={px+dx*hl} y2={py}/>
+          <line x1={px} y1={py} x2={px} y2={py+dy*hl}/>
+        </g>
+      ))}
+      <line x1="50" y1="47" x2="50" y2="53" stroke={`${C.accent}80`} strokeWidth="0.6"/>
+      <line x1="47" y1="50" x2="53" y2="50" stroke={`${C.accent}80`} strokeWidth="0.6"/>
+    </svg>
+  );
+}
 
-  const videoRef       = useRef(null);
-  const streamRef      = useRef(null);
-  const lastPinchDist  = useRef(null);
-  const imageCapRef    = useRef(null);
-  const shootingRef    = useRef(false);
-  const [camReady, setCamReady] = useState(false);
-  const [flash,    setFlash]    = useState(false);
-  const [hdReady,  setHdReady]  = useState(false);   // 고화질 사진 촬영 가능 여부
-  const [shooting, setShooting] = useState(false);   // 사진 촬영 진행 중 (움직이면 흔들림)
-  const [lastShot, setLastShot] = useState(null);    // 직전 촬영 결과 { hd, size, err }
-  const [camError, setCamError] = useState(null);
-  const [zoomLevel, setZoomLevel] = useState(defaultZoom);
+// ─── CropEditor — 찍은 사진을 밀고/확대해서 가이드 박스에 맞춤 ──
+function CropEditor({ photo, productId, saving, onConfirm, onRetake }) {
+  const wrapRef = useRef(null);
+  const [size, setSize] = useState(null);          // 편집 영역 크기 { w, h }
+  const [, setTick] = useState(0);
+  const tf = useRef(null);                          // { s, tx, ty } 사진 배율·위치
+  const gesture = useRef(null);
+  const [rw, rh] = CROP_RATIO[productId] || [4, 3];
+
+  // 편집 영역 크기 측정
+  useEffect(() => {
+    const el = wrapRef.current; if (!el) return;
+    const measure = () => setSize({ w:el.clientWidth, h:el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure); ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // 가이드 박스 (화면 좌표)
+  const box = useMemo(() => {
+    if (!size) return null;
+    let bw = size.w * 0.9, bh = bw * rh / rw;
+    if (bh > size.h * 0.85) { bh = size.h * 0.85; bw = bh * rw / rh; }
+    return { x:(size.w-bw)/2, y:(size.h-bh)/2, w:bw, h:bh };
+  }, [size, rw, rh]);
+
+  // 박스를 항상 사진이 덮도록 배율·위치 제한
+  const minScale = box ? Math.max(box.w / photo.w, box.h / photo.h) : 1;
+  const clamp = ({ s, tx, ty }) => {
+    s  = Math.min(Math.max(s, minScale), minScale * 8);
+    tx = Math.min(box.x, Math.max(box.x + box.w - photo.w * s, tx));
+    ty = Math.min(box.y, Math.max(box.y + box.h - photo.h * s, ty));
+    return { s, tx, ty };
+  };
+  const apply = (next) => { tf.current = clamp(next); setTick(t => t + 1); };
+
+  // 처음: 박스를 꽉 채우고 가운데 정렬
+  useEffect(() => {
+    if (!box) return;
+    const s = minScale;
+    tf.current = clamp({ s, tx: box.x + box.w/2 - photo.w*s/2, ty: box.y + box.h/2 - photo.h*s/2 });
+    setTick(t => t + 1);
+  }, [box, photo]);
+
+  // 손가락 조작: 한 손가락 이동, 두 손가락 확대/축소
+  const pt = (e, i) => {
+    const r = wrapRef.current.getBoundingClientRect();
+    return { x: e.touches[i].clientX - r.left, y: e.touches[i].clientY - r.top };
+  };
+  const onTouchStart = (e) => {
+    if (!tf.current) return;
+    if (e.touches.length === 1) gesture.current = { p: pt(e, 0), start: { ...tf.current } };
+    if (e.touches.length === 2) {
+      const a = pt(e, 0), b = pt(e, 1);
+      gesture.current = { dist: Math.hypot(a.x-b.x, a.y-b.y), mid: { x:(a.x+b.x)/2, y:(a.y+b.y)/2 }, start: { ...tf.current } };
+    }
+  };
+  const onTouchMove = (e) => {
+    const g = gesture.current; if (!g) return;
+    if (e.touches.length === 1 && g.p) {
+      const p = pt(e, 0);
+      apply({ s:g.start.s, tx:g.start.tx + p.x - g.p.x, ty:g.start.ty + p.y - g.p.y });
+    } else if (e.touches.length === 2 && g.dist) {
+      const a = pt(e, 0), b = pt(e, 1);
+      const mid = { x:(a.x+b.x)/2, y:(a.y+b.y)/2 };
+      const s = g.start.s * Math.hypot(a.x-b.x, a.y-b.y) / g.dist;
+      // 두 손가락 가운데 지점이 사진의 같은 곳을 가리키도록
+      const ix = (g.mid.x - g.start.tx) / g.start.s, iy = (g.mid.y - g.start.ty) / g.start.s;
+      apply({ s, tx: mid.x - ix * s, ty: mid.y - iy * s });
+    }
+  };
+  const onTouchEnd = (e) => {
+    if (e.touches.length === 1 && tf.current) gesture.current = { p: pt(e, 0), start: { ...tf.current } };
+    else if (e.touches.length === 0) gesture.current = null;
+  };
+  // PC 확인용: 마우스 끌기 + 휠 확대
+  const onMouseDown = (e) => { if (tf.current) gesture.current = { m:{ x:e.clientX, y:e.clientY }, start:{ ...tf.current } }; };
+  const onMouseMove = (e) => {
+    const g = gesture.current; if (!g?.m) return;
+    apply({ s:g.start.s, tx:g.start.tx + e.clientX - g.m.x, ty:g.start.ty + e.clientY - g.m.y });
+  };
+  const onWheel = (e) => {
+    if (!tf.current) return;
+    const r = wrapRef.current.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top, t = tf.current;
+    const s = t.s * (e.deltaY < 0 ? 1.1 : 1/1.1);
+    apply({ s, tx: mx - (mx - t.tx) * s / t.s, ty: my - (my - t.ty) * s / t.s });
+  };
+
+  const t = tf.current;
+  const outW = t && box ? Math.round(box.w / t.s) : 0;
+  const outH = t && box ? Math.round(box.h / t.s) : 0;
+
+  return (
+    <div style={{position:'absolute',inset:0,zIndex:105,background:'#000',display:'flex',flexDirection:'column'}}>
+      <div ref={wrapRef} style={{position:'relative',flex:1,overflow:'hidden',touchAction:'none',cursor:'grab'}}
+        onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={()=>gesture.current=null} onMouseLeave={()=>gesture.current=null}
+        onWheel={onWheel}>
+        {t && (
+          <img src={photo.url} alt="" draggable={false} style={{position:'absolute',left:0,top:0,
+            width:photo.w,height:photo.h,maxWidth:'none',transformOrigin:'0 0',
+            transform:`translate(${t.tx}px,${t.ty}px) scale(${t.s})`,userSelect:'none',pointerEvents:'none'}}/>
+        )}
+        {box && (
+          <div style={{position:'absolute',left:box.x,top:box.y,width:box.w,height:box.h,pointerEvents:'none',
+            boxShadow:'0 0 0 9999px rgba(0,0,0,0.55)'}}>
+            <GuideCorners/>
+          </div>
+        )}
+        <div style={{position:'absolute',top:14,left:0,right:0,textAlign:'center',pointerEvents:'none'}}>
+          <span style={{background:'rgba(0,0,0,0.6)',borderRadius:14,padding:'6px 14px',fontSize:12,color:C.text}}>
+            사진을 밀고, 두 손가락으로 확대해 부품을 박스에 맞추세요
+          </span>
+        </div>
+        <div style={{position:'absolute',bottom:10,left:0,right:0,textAlign:'center',pointerEvents:'none'}}>
+          <span style={{background:'rgba(0,0,0,0.6)',borderRadius:10,padding:'4px 10px',fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>
+            저장 크기 {outW}×{outH} · {(outW*outH/1e6).toFixed(1)}MP
+          </span>
+        </div>
+      </div>
+      <div style={{background:'rgba(0,0,0,0.9)',padding:'14px 16px',paddingBottom:'max(14px, env(safe-area-inset-bottom))',display:'flex',gap:8}}>
+        <button onClick={onRetake} disabled={saving} style={{flex:1,height:52,borderRadius:12,background:'none',
+          border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:600,fontFamily:FONT_SANS,cursor:'pointer'}}>다시 찍기</button>
+        <button onClick={()=>t && box && onConfirm({ x:(box.x-t.tx)/t.s, y:(box.y-t.ty)/t.s, w:box.w/t.s, h:box.h/t.s })}
+          disabled={saving || !t} style={{flex:2,height:52,borderRadius:12,background:C.accent,border:'none',
+          color:C.bg,fontSize:15,fontWeight:700,fontFamily:FONT_SANS,cursor:'pointer',opacity:saving?0.5:1}}>
+          {saving ? '저장 중...' : '확인'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── CameraScreen ─────────────────────────────────────────────
+// 촬영은 폰 기본 카메라 앱(삼성 카메라)으로 → 망원 렌즈·원본 화질 그대로 사용
+// 찍은 뒤 CropEditor에서 가이드 박스에 맞춰 잘라 저장
+function CameraScreen({ product, segments, shotIndex, totalShots, paused,
+    onCapture, onStop, onResume, capturedImages }) {
+
+  const fileRef = useRef(null);
+  const [photo,  setPhoto]  = useState(null);   // 방금 찍은 원본 { url, img, w, h }
+  const [saving, setSaving] = useState(false);
+  const [error,  setError]  = useState(null);
 
   const isCage = product.id === 'cage';
   const faceSide = isCage && shotIndex >= segments ? 'BACK' : 'FRONT';
+  const [rw, rh] = CROP_RATIO[product.id] || [4, 3];
 
-  // 카메라 시작
-  useEffect(() => {
-    let cancelled = false;
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1920 }, height:{ ideal:1080 } },
-          audio:false,
-        });
-        if (cancelled) { stream.getTracks().forEach(t=>t.stop()); return; }
-        streamRef.current = stream;
-        // 고화질 사진 촬영 준비 (ImageCapture 미지원 기기는 기존 동영상 캡처로 동작)
-        if ('ImageCapture' in window) {
-          try {
-            const ic = new ImageCapture(stream.getVideoTracks()[0]);
-            const pc = await ic.getPhotoCapabilities();
-            imageCapRef.current = { ic,
-              settings: pc.imageWidth?.max ? { imageWidth:pc.imageWidth.max, imageHeight:pc.imageHeight.max } : {} };
-            setHdReady(true);
-          } catch(e) { imageCapRef.current = null; }
-        }
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play();
-          setCamReady(true);
-        }
-      } catch(err) { if (!cancelled) setCamError(err.message); }
-    }
-    startCamera();
-    return () => { cancelled=true; streamRef.current?.getTracks().forEach(t=>t.stop()); };
-  }, []);
-
-  // CSS 프리뷰 줌
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.style.transform      = `scale(${zoomLevel})`;
-      videoRef.current.style.transformOrigin = 'center';
-    }
-    onZoomChange?.(zoomLevel);
-  }, [zoomLevel]);
-
-  const clampZoom = (v) => Math.min(4, Math.max(0.5, +v.toFixed(2)));
-
-  // 핀치 줌
-  const handleTouchStart = useCallback((e) => {
-    if (e.touches.length===2) {
-      lastPinchDist.current = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY
-      );
-    }
-  }, []);
-  const handleTouchMove = useCallback((e) => {
-    if (e.touches.length===2 && lastPinchDist.current) {
-      const dist  = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
-      const delta = dist / lastPinchDist.current;
-      setZoomLevel(prev => clampZoom(prev * delta));
-      lastPinchDist.current = dist;
-    }
-  }, []);
-  const handleTouchEnd = useCallback(() => { lastPinchDist.current=null; }, []);
-
-  // 고화질 사진 촬영 (ImageCapture.takePhoto) — 실패하면 { err }
-  const takeHighResPhoto = async () => {
-    if (!imageCapRef.current) return { err:'미지원 브라우저' };
-    try {
-      const { ic, settings } = imageCapRef.current;
-      const blob = await ic.takePhoto(settings);
-      const img  = new Image();
-      img.src = URL.createObjectURL(blob);
-      await img.decode();   // EXIF 회전이 반영된 크기
-      URL.revokeObjectURL(img.src);
-      return { img };
-    } catch(e) { return { err:e.name || '촬영 실패' }; }
+  // 카메라 앱 열기 (반드시 사용자가 누른 버튼 안에서 호출해야 열림)
+  const openCamera = () => {
+    if (!fileRef.current) return;
+    fileRef.current.value = '';
+    fileRef.current.click();
   };
 
-  // 셔터 (고화질 사진 → 미리보기 범위 맞춤 → 비율 크롭 + 소프트웨어 줌)
-  const handleShutter = useCallback(async () => {
-    if (!videoRef.current || !camReady || shootingRef.current) return;
-    shootingRef.current = true;
-    setShooting(true);
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.src = url;
+    try { await img.decode(); }   // EXIF 회전이 반영된 크기
+    catch { URL.revokeObjectURL(url); setError('사진을 열 수 없습니다. 다시 찍어 주세요.'); return; }
+    setPhoto({ url, img, w:img.naturalWidth, h:img.naturalHeight });
+  };
+
+  const handleRetake = () => {
+    if (photo) URL.revokeObjectURL(photo.url);
+    setPhoto(null);
+    openCamera();
+  };
+
+  const handleConfirm = async (rect) => {
+    const p = photo;
+    // 다음 촬영이 이어지면 카메라를 바로 다시 열어 누르는 횟수를 줄임
+    // (CAGE 앞면을 다 찍으면 뒤집기 안내가 먼저 나오므로 제외)
+    const next = shotIndex + 1;
+    if (next < totalShots && !(isCage && next === segments)) openCamera();
+    setSaving(true);
     try {
-      const video = videoRef.current;
-      const vw = video.videoWidth  || 1280;
-      const vh = video.videoHeight || 720;
-      const [rw, rh] = CROP_RATIO[product.id] || [4, 3];
-
-      // 0. 촬영 원본: 고화질 사진, 안 되면 기존처럼 동영상 프레임
-      let source = video, baseX = 0, baseY = 0, baseW = vw, baseH = vh;
-      const { img:photo, err } = await takeHighResPhoto();
-      setFlash(true); setTimeout(()=>setFlash(false), 120);   // 실제 촬영 완료 시점에 플래시
-      let fallbackErr = err;
-      if (photo && (photo.naturalWidth > photo.naturalHeight) !== (vw > vh)) fallbackErr = '사진 방향 불일치';
-      else if (photo) {
-        // 사진은 미리보기(동영상)보다 넓게 찍히므로, 미리보기와 같은 범위로 먼저 맞춤
-        const pw = photo.naturalWidth, ph = photo.naturalHeight;
-        source = photo;
-        if (pw/ph > vw/vh) { baseH=ph; baseW=ph*vw/vh; baseX=(pw-baseW)/2; }
-        else               { baseW=pw; baseH=pw*vh/vw; baseY=(ph-baseH)/2; }
-      }
-
-      // 1. 비율 크롭
-      let srcX, srcY, srcW, srcH;
-      if (baseW/baseH > rw/rh) {
-        srcH=baseH; srcW=baseH*rw/rh; srcX=baseX+(baseW-srcW)/2; srcY=baseY;
-      } else {
-        srcW=baseW; srcH=baseW*rh/rw; srcX=baseX; srcY=baseY+(baseH-srcH)/2;
-      }
-
-      // 2. 소프트웨어 줌 (중심 기준 축소)
-      if (zoomLevel !== 1) {
-        const zw=srcW/zoomLevel, zh=srcH/zoomLevel;
-        srcX += (srcW-zw)/2; srcY += (srcH-zh)/2;
-        srcW=zw; srcH=zh;
-      }
-
       const canvas = document.createElement('canvas');
-      canvas.width  = Math.round(srcW);
-      canvas.height = Math.round(srcH);
-      canvas.getContext('2d').drawImage(source, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
+      canvas.width  = Math.round(rect.w);
+      canvas.height = Math.round(rect.h);
+      canvas.getContext('2d').drawImage(p.img, rect.x, rect.y, rect.w, rect.h, 0, 0, canvas.width, canvas.height);
       const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.92));
-      setLastShot({ hd: source !== video, size:`${canvas.width}×${canvas.height}`, err: source !== video ? null : fallbackErr });
       onCapture(blob, URL.createObjectURL(blob));
     } finally {
-      shootingRef.current = false;
-      setShooting(false);
+      URL.revokeObjectURL(p.url);
+      setPhoto(cur => cur === p ? null : cur);
+      setSaving(false);
     }
-  }, [camReady, onCapture, product.id, zoomLevel]);
-
-  if (camError) return (
-    <div style={{position:'absolute',inset:0,zIndex:100,background:C.bg,
-      display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:24,gap:16}}>
-      <div style={{fontSize:40}}>📷</div>
-      <div style={{fontSize:16,fontWeight:700,color:C.text}}>카메라 접근 필요</div>
-      <div style={{fontSize:13,color:C.dim,textAlign:'center',lineHeight:1.6}}>브라우저에서 카메라 권한을 허용해 주세요.</div>
-      <div style={{fontFamily:FONT_MONO,fontSize:11,color:C.danger,padding:'8px 12px',background:`${C.danger}15`,borderRadius:8}}>{camError}</div>
-      <button onClick={onStop} style={{height:48,padding:'0 24px',borderRadius:12,
-        background:C.surface,border:`1px solid ${C.border}`,color:C.text,fontSize:14,fontWeight:600,cursor:'pointer'}}>돌아가기</button>
-    </div>
-  );
+  };
 
   return (
-    <div style={{position:'absolute',inset:0,zIndex:100,background:'#000',display:'flex',flexDirection:'column'}}
-      onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}>
+    <div style={{position:'absolute',inset:0,zIndex:100,background:C.bg,display:'flex',flexDirection:'column'}}>
+      <input ref={fileRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={handleFile}/>
 
-      {/* 뷰파인더 */}
-      <div style={{position:'relative',flex:1,overflow:'hidden'}}>
-        <video ref={videoRef} id="camera-stream" playsInline muted autoPlay
-          style={{width:'100%',height:'100%',objectFit:'cover',display:'block'}}/>
-        {flash && <div style={{position:'absolute',inset:0,background:'white',opacity:0.7,pointerEvents:'none'}}/>}
-
-        {/* 화질 표시 — 고화질(HD) 사진인지, 일반 화질(동영상 캡처)로 찍혔는지 */}
-        {camReady && (
-          <div style={{position:'absolute',top:56,left:12,zIndex:5,pointerEvents:'none',
-            background:'rgba(0,0,0,0.6)',borderRadius:8,padding:'4px 8px',
-            fontFamily:FONT_MONO,fontSize:10,lineHeight:1.5,
-            color: (lastShot ? lastShot.hd : hdReady) ? C.accent : C.danger}}>
-            {(lastShot ? lastShot.hd : hdReady) ? 'HD 사진' : '일반 화질'}
-            {lastShot && <div style={{color:C.dim}}>{lastShot.size}{lastShot.err ? ` · ${lastShot.err}` : ''}</div>}
+      {/* 상단 HUD */}
+      <div className="safe-top" style={{display:'flex',alignItems:'center',justifyContent:'center',position:'relative',padding:'14px 14px 10px'}}>
+        <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:20,padding:'6px 16px',
+          display:'flex',alignItems:'center',gap:10}}>
+          <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>{Math.round(shotIndex*360/totalShots)}°</div>
+          <div style={{width:1,height:12,background:C.border}}/>
+          <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.accent}}>
+            {product.name}{isCage && ` · ${faceSide}`}
           </div>
-        )}
-
-        {/* 촬영 중 — 사진이 저장될 때까지 움직이지 않도록 안내 */}
-        {shooting && (
-          <div style={{position:'absolute',inset:0,zIndex:6,display:'flex',alignItems:'center',justifyContent:'center',pointerEvents:'none'}}>
-            <div style={{background:'rgba(0,0,0,0.7)',borderRadius:12,padding:'10px 18px',fontSize:14,fontWeight:700,color:C.accent}}>
-              촬영 중 · 움직이지 마세요
-            </div>
-          </div>
-        )}
-
-        {/* 가이드 프레임 — CSS aspect-ratio 방식 (SVG stretch 문제 해결) */}
-        <div style={{position:'absolute',inset:0,pointerEvents:'none'}}>
-          {/* 어두운 오버레이 + 가이드 박스 */}
-          <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
-            {(()=>{
-              const boxStyle = getGuideBoxStyle(product.id);
-              const hl = 12; // 코너 마크 길이 (viewBox 100 기준 %)
-              return (
-                <div style={{
-                  ...boxStyle,
-                  position:'relative',
-                  flexShrink:0,
-                  // 가이드 박스 외부를 어둡게 (overflow:hidden 부모에서 클리핑됨)
-                  boxShadow:'0 0 0 9999px rgba(0,0,0,0.38)',
-                }}>
-                  {/* 테두리 + 코너 마크 SVG (박스 내부라 비율 정확) */}
-                  <svg style={{position:'absolute',inset:0,width:'100%',height:'100%'}} viewBox="0 0 100 100" preserveAspectRatio="none">
-                    <rect x="0.5" y="0.5" width="99" height="99" rx="1"
-                      fill="none" stroke={`${C.accent}55`} strokeWidth="0.7" strokeDasharray="3 2.5"/>
-                    {[{px:0,py:0,dx:1,dy:1},{px:100,py:0,dx:-1,dy:1},{px:0,py:100,dx:1,dy:-1},{px:100,py:100,dx:-1,dy:-1}].map(({px,py,dx,dy},i)=>(
-                      <g key={i} stroke={C.accent} strokeWidth="2" strokeLinecap="round">
-                        <line x1={px} y1={py} x2={px+dx*hl} y2={py}/>
-                        <line x1={px} y1={py} x2={px} y2={py+dy*hl}/>
-                      </g>
-                    ))}
-                    <line x1="50" y1="47" x2="50" y2="53" stroke={`${C.accent}80`} strokeWidth="0.6"/>
-                    <line x1="47" y1="50" x2="53" y2="50" stroke={`${C.accent}80`} strokeWidth="0.6"/>
-                  </svg>
-                </div>
-              );
-            })()}
-          </div>
-
-          {/* 상단 HUD */}
-          <div style={{position:'absolute',top:14,left:0,right:0,display:'flex',justifyContent:'center'}}>
-            <div style={{background:'rgba(0,0,0,0.6)',backdropFilter:'blur(8px)',
-              border:`1px solid ${C.border}`,borderRadius:20,padding:'6px 16px',
-              display:'flex',alignItems:'center',gap:10}}>
-              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>{Math.round(shotIndex*360/totalShots)}°</div>
-              <div style={{width:1,height:12,background:C.border}}/>
-              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.accent}}>
-                {product.name}{isCage && ` · ${faceSide}`}
-              </div>
-              <div style={{width:1,height:12,background:C.border}}/>
-              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>{shotIndex+1}/{totalShots}</div>
-              <div style={{width:1,height:12,background:C.border}}/>
-              <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.amber}}>{zoomLevel.toFixed(1)}×</div>
-            </div>
-          </div>
-
-          {/* 로딩 */}
-          {!camReady && (
-            <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center'}}>
-              <div style={{background:'rgba(0,0,0,0.7)',borderRadius:12,padding:'16px 24px',display:'flex',alignItems:'center',gap:10}}>
-                <div style={{width:16,height:16,border:`2px solid ${C.accent}`,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
-                <span style={{fontSize:13,color:C.text}}>카메라 준비 중...</span>
-              </div>
-            </div>
-          )}
+          <div style={{width:1,height:12,background:C.border}}/>
+          <div style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>{shotIndex+1}/{totalShots}</div>
         </div>
-
-        {/* 최근 촬영 미리보기 (좌측) */}
-        <div style={{position:'absolute',left:10,bottom:10,display:'flex',flexDirection:'column',gap:4}}>
-          {capturedImages.slice(-4).map((url,i)=>(
-            <div key={i} style={{width:44,height:44,borderRadius:6,overflow:'hidden',border:`1px solid ${C.border}`,opacity:0.85}}>
-              <img src={url} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
-            </div>
-          ))}
-        </div>
-
-        {/* 중단 버튼 */}
-        <button onClick={onStop} style={{position:'absolute',top:14,right:14,
-          background:'rgba(0,0,0,0.6)',backdropFilter:'blur(8px)',
-          border:`1px solid ${C.danger}`,color:C.danger,
+        <button onClick={onStop} style={{position:'absolute',right:14,
+          background:'none',border:`1px solid ${C.danger}`,color:C.danger,
           padding:'6px 14px',borderRadius:18,fontSize:12,fontWeight:600,
           fontFamily:FONT_SANS,cursor:'pointer'}}>중단</button>
       </div>
 
-      {/* 줌 컨트롤 바 */}
-      <div style={{background:'rgba(0,0,0,0.88)',backdropFilter:'blur(12px)',
-        padding:'8px 16px',display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-        {/* 프리셋 버튼 */}
-        {[0.5,1,1.5,2,3,4].map(z=>{
-          const active = Math.abs(zoomLevel-z)<0.05;
-          return (
-            <button key={z} onClick={()=>setZoomLevel(z)} style={{
-              background:active?C.accent:'rgba(255,255,255,0.12)',
-              color:active?C.bg:'rgba(255,255,255,0.8)',
-              border:'none',borderRadius:10,padding:'5px 9px',
-              fontSize:10,fontFamily:FONT_MONO,cursor:'pointer',fontWeight:active?700:400,
-            }}>{z}×</button>
-          );
-        })}
-        <div style={{width:1,height:18,background:'rgba(255,255,255,0.15)',margin:'0 2px'}}/>
-        <button onClick={()=>setZoomLevel(prev=>clampZoom(prev-0.1))} style={{
-          width:28,height:28,borderRadius:14,background:'rgba(255,255,255,0.12)',
-          border:'none',color:'#fff',fontSize:16,cursor:'pointer',
-          display:'flex',alignItems:'center',justifyContent:'center',lineHeight:1}}>−</button>
-        <span style={{fontFamily:FONT_MONO,fontSize:12,color:'#fff',minWidth:36,textAlign:'center'}}>
-          {zoomLevel.toFixed(1)}×
-        </span>
-        <button onClick={()=>setZoomLevel(prev=>clampZoom(prev+0.1))} style={{
-          width:28,height:28,borderRadius:14,background:'rgba(255,255,255,0.12)',
-          border:'none',color:'#fff',fontSize:16,cursor:'pointer',
-          display:'flex',alignItems:'center',justifyContent:'center',lineHeight:1}}>+</button>
+      {/* 촬영 안내 */}
+      <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'0 28px',gap:18,minHeight:0}}>
+        <div style={{position:'relative',
+          ...(rw >= rh ? { width:'70%', maxWidth:280 } : { height:'34vh' }),
+          aspectRatio:`${rw}/${rh}`,background:C.surface,borderRadius:4}}>
+          <GuideCorners/>
+          <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',
+            fontFamily:FONT_MONO,fontSize:12,color:C.dim}}>{rw}:{rh}</div>
+        </div>
+        <div style={{textAlign:'center'}}>
+          <div style={{fontSize:18,fontWeight:700,color:C.text,marginBottom:6}}>
+            {product.name}{isCage && ` · ${faceSide}`} {totalShots > 1 && `· ${Math.round(shotIndex*360/totalShots)}°`}
+          </div>
+          <div style={{fontSize:12,color:C.dim,lineHeight:1.7}}>
+            카메라가 열리면 <b style={{color:C.accent}}>3×</b> 줌 → 촬영 → <b style={{color:C.accent}}>✓</b><br/>
+            찍은 뒤 박스에 맞춰 자를 수 있어요<br/>
+            <span style={{color:C.dimmer}}>카메라 비율은 3:4 (50MP 아님) 권장</span>
+          </div>
+        </div>
+        {error && <div style={{fontSize:12,color:C.danger}}>{error}</div>}
       </div>
 
+      {/* 최근 촬영 */}
+      {capturedImages.length > 0 && (
+        <div style={{display:'flex',gap:6,justifyContent:'center',padding:'0 16px 10px'}}>
+          {capturedImages.slice(-6).map((url,i)=>(
+            <div key={i} style={{width:40,height:40,borderRadius:6,overflow:'hidden',border:`1px solid ${C.border}`}}>
+              <img src={url} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* 셔터 바 */}
-      <div style={{background:'rgba(0,0,0,0.85)',backdropFilter:'blur(20px)',
+      <div style={{background:C.surface,borderTop:`1px solid ${C.border}`,
         padding:'16px 24px',paddingBottom:'max(16px, env(safe-area-inset-bottom))',
         display:'flex',alignItems:'center',justifyContent:'space-between',gap:16}}>
         <div style={{flex:1}}>
@@ -449,18 +420,16 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
             <span style={{fontFamily:FONT_MONO,fontSize:10,color:C.dim}}>진행</span>
             <span style={{fontFamily:FONT_MONO,fontSize:10,color:C.accent}}>{shotIndex}/{totalShots}</span>
           </div>
-          <div style={{height:3,background:C.surface,borderRadius:2}}>
+          <div style={{height:3,background:C.bg,borderRadius:2}}>
             <div style={{height:'100%',width:`${(shotIndex/totalShots)*100}%`,
               background:C.accent,borderRadius:2,transition:'width 0.3s ease'}}/>
           </div>
         </div>
-        <button onClick={handleShutter} disabled={!camReady} style={{
-          width:72,height:72,borderRadius:36,flexShrink:0,
-          background:camReady?C.accent:C.dimmer,
-          border:'4px solid rgba(255,255,255,0.3)',
-          cursor:camReady?'pointer':'not-allowed',
+        <button onClick={openCamera} disabled={saving} style={{
+          width:72,height:72,borderRadius:36,flexShrink:0,background:C.accent,
+          border:'4px solid rgba(255,255,255,0.3)',cursor:'pointer',
           display:'flex',alignItems:'center',justifyContent:'center',
-          boxShadow:camReady?`0 0 24px ${C.accent}60`:'none',
+          boxShadow:`0 0 24px ${C.accent}60`,
         }}>
           <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
             <circle cx="14" cy="14" r="10" fill={C.bg}/>
@@ -475,8 +444,14 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
         </div>
       </div>
 
+      {/* 찍은 사진 맞추기 */}
+      {photo && (
+        <CropEditor photo={photo} productId={product.id} saving={saving}
+          onConfirm={handleConfirm} onRetake={handleRetake}/>
+      )}
+
       {/* CAGE 뒤집기 모달 */}
-      {paused && (
+      {paused && !photo && (
         <div style={{position:'absolute',inset:0,zIndex:110,
           background:'rgba(11,12,14,0.94)',backdropFilter:'blur(10px)',
           display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'0 28px'}}>
@@ -502,7 +477,7 @@ function CameraScreen({ product, segments, shotIndex, totalShots, paused,
             <button onClick={onStop} style={{flex:1,height:48,borderRadius:12,
               background:'none',border:`1px solid ${C.border}`,color:C.text,
               fontSize:13,fontWeight:500,fontFamily:FONT_SANS,cursor:'pointer'}}>중단</button>
-            <button onClick={onResume} style={{flex:2,height:48,borderRadius:12,
+            <button onClick={()=>{ onResume(); openCamera(); }} style={{flex:2,height:48,borderRadius:12,
               background:C.accent,color:C.bg,fontSize:13,fontWeight:700,
               fontFamily:FONT_SANS,cursor:'pointer',border:'none',
               display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
